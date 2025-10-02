@@ -37,7 +37,8 @@ def explain_sanctions(company_name: str, ofac_res: dict, os_res: dict) -> dict:
                 desc = m.get('description', '')
                 id_ = m.get('id', '')
                 url = m.get('url', '')
-                os_details += f" Match {i}: {name} (ID: {id_}, country: {country}, programs: {programs}, score: {m.get('match_score', 0):.2f}). {desc} {url if url else ''}."
+                score = m.get('match_score', 0)
+                os_details += f" Match {i}: {name} (ID: {id_}, country: {country}, programs: {programs}, score: {score:.2f}). {desc} {url if url else ''}."
             os_details += f" Average confidence across all: {avg_score:.2f}."
         else:
             os_details = "No matches found."
