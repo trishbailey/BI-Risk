@@ -116,36 +116,4 @@ if st.session_state.step == 1:
 # Step 2: Sanctions Check
 # -----------------------------------------------------------------------------
 elif st.session_state.step == 2:
-    st.header("Step 2: Sanctions Check")
-    st.subheader(f"Checking: {st.session_state.company_name}")
-    st.info("This step checks OFAC and OpenSanctions (covers global incl. EU/UN/UK).")
-    # Lazy imports so the app loads even if a client is missing
-    try:
-        from src.api_clients.sanctions.ofac import OFACClient
-        ofac_available = True
-    except Exception as e:
-        st.error(f"OFAC client import error: {e}")
-        ofac_available = False
-    try:
-        from src.api_clients.sanctions.opensanctions import OpenSanctionsClient
-        opensanctions_available = True
-    except Exception:
-        opensanctions_available = False
-   
-    # Define columns at the top of the block to ensure scope
-    col1, col2 = st.columns(2)
-   
-    # OFAC Section (persistent summary + pagination button)
-    with col1:
-        # Initialize pagination if not set
-        if 'ofac_page' not in st.session_state:
-            st.session_state.ofac_page = 1
-            st.session_state.ofac_full_matches = []  # Store all matches
-       
-        # Persistent OFAC summary (initial + batches)
-        if st.session_state.get('ofac_summary'):
-            st.subheader("OFAC Summary")
-            st.write(st.session_state.ofac_summary)
-       
-        # Pagination button (dynamic label)
-        ofac_res = st.session_state.get('ofac_result
+    st.header("Step
