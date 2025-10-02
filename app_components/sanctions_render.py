@@ -57,12 +57,25 @@ def _risk_badge(score: float, programs: List[str]) -> str:
     ">{base} match</span>"""
 
 def _fmt_date(dt: str) -> str:
-    if not dt: 
+    if not dt:
         return ""
     try:
         return datetime.fromisoformat(dt.replace("Z","")).strftime("%d %b %Y")
     except Exception:
         return dt
+
+def _open_card():
+    st.markdown(
+        """
+        <div style="
+            border:1px solid #ddd; border-radius:10px;
+            padding:14px 16px; margin:14px 0; background:#fff;
+        ">""",
+        unsafe_allow_html=True,
+    )
+
+def _close_card():
+    st.markdown("</div>", unsafe_allow_html=True)
 
 def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
     st.subheader(f"Sanctions Check — {esc(source_label)}")
@@ -85,59 +98,61 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
     st.warning(f"Found {result.get('match_count', len(matches))} potential match(es).")
 
     for m in matches:
-        # NOTE: st.container(border=True) requires Streamlit >= 1.31; remove border= if on older versions
-        with st.container:
-            title = m.get("name") or "(no name)"
-            st.markdown(f"### {esc(title)}")
+        _open_card()
 
-            score = float(m.get("match_score") or 0.0)
-            programs = _clean_list(m.get("programs") or [])
+        title = m.get("name") or "(no name)"
+        st.markdown(f"### {esc(title)}")
 
-            header_cols = st.columns([1, 1, 1, 1])
-            with header_cols[0]:
-                st.markdown(_risk_badge(score, programs), unsafe_allow_html=True)
-            with header_cols[1]:
-                st.metric("Match score", f"{score:.2f}")
-            with header_cols[2]:
-                st.write("Type"); st.code(m.get("type",""), language=None)
-            with header_cols[3]:
-                ref = m.get("sdn_number") or m.get("eu_reference") or ""
-                st.write("Ref/ID"); st.code(ref, language=None)
+        score = float(m.get("match_score") or 0.0)
+        programs = _clean_list(m.get("programs") or [])
 
-            if programs:
-                st.write("Programs")
-                st.markdown("".join(_chip(p) for p in programs), unsafe_allow_html=True)
+        header_cols = st.columns([1, 1, 1, 1])
+        with header_cols[0]:
+            st.markdown(_risk_badge(score, programs), unsafe_allow_html=True)
+        with header_cols[1]:
+            st.metric("Match score", f"{score:.2f}")
+        with header_cols[2]:
+            st.write("Type"); st.code(m.get("type",""), language=None)
+        with header_cols[3]:
+            ref = m.get("sdn_number") or m.get("eu_reference") or ""
+            st.write("Ref/ID"); st.code(ref, language=None)
 
-            warnings, clean_ids = _extract_warnings_from_ids(m.get("ids") or [])
-            if warnings:
-                st.info("**Secondary sanctions risk**\n\n- " + "\n- ".join(esc(w) for w in warnings))
+        if programs:
+            st.write("Programs")
+            st.markdown("".join(_chip(p) for p in programs), unsafe_allow_html=True)
 
-            aliases = _clean_list(m.get("aliases") or [])
-            if aliases:
-                with st.expander(f"Aliases ({len(aliases)})"):
-                    st.write("\n".join(f"- {esc(a)}" for a in aliases))
+        warnings, clean_ids = _extract_warnings_from_ids(m.get("ids") or [])
+        if warnings:
+            st.info("**Secondary sanctions risk**\n\n- " + "\n- ".join(esc(w) for w in warnings))
 
-            addrs = _clean_addresses(m.get("addresses") or [])
-            if addrs:
-                with st.expander(f"Addresses ({len(addrs)})"):
-                    for a in addrs:
-                        line = ", ".join([x for x in [
-                            a.get("address1"), a.get("address2"), a.get("city"),
-                            a.get("state"), a.get("postal_code"), a.get("country")
-                        ] if x])
-                        st.write(f"- {esc(line)}")
+        aliases = _clean_list(m.get("aliases") or [])
+        if aliases:
+            with st.expander(f"Aliases ({len(aliases)})"):
+                st.write("\n".join(f"- {esc(a)}" for a in aliases))
 
-            if clean_ids:
-                with st.expander(f"Identifiers ({len(clean_ids)})"):
-                    for i in clean_ids:
-                        t = (i.get("type") or "").strip() or "ID"
-                        v = i.get("value","")
-                        st.write(f"- **{esc(t)}:** {esc(v)}")
+        addrs = _clean_addresses(m.get("addresses") or [])
+        if addrs:
+            with st.expander(f"Addresses ({len(addrs)})"):
+                for a in addrs:
+                    line = ", ".join([x for x in [
+                        a.get("address1"), a.get("address2"), a.get("city"),
+                        a.get("state"), a.get("postal_code"), a.get("country")
+                    ] if x])
+                    st.write(f"- {esc(line)}")
 
-            remarks = (m.get("remarks") or m.get("remark") or "").strip()
-            pub = _fmt_date(m.get("publishDate","") or m.get("listing_date",""))
-            foot = []
-            if pub: foot.append(f"Published/Listed: {esc(pub)}")
-            if remarks: foot.append(f"Remarks: {esc(remarks)}")
-            if foot:
-                st.caption(" • ".join(foot))
+        if clean_ids:
+            with st.expander(f"Identifiers ({len(clean_ids)})"):
+                for i in clean_ids:
+                    t = (i.get("type") or "").strip() or "ID"
+                    v = i.get("value","")
+                    st.write(f"- **{esc(t)}:** {esc(v)}")
+
+        remarks = (m.get("remarks") or m.get("remark") or "").strip()
+        pub = _fmt_date(m.get("publishDate","") or m.get("listing_date",""))
+        foot = []
+        if pub: foot.append(f"Published/Listed: {esc(pub)}")
+        if remarks: foot.append(f"Remarks: {esc(remarks)}")
+        if foot:
+            st.caption(" • ".join(foot))
+
+        _close_card()
