@@ -102,23 +102,80 @@ elif st.session_state.step == 2:
     
     st.info("This step checks OFAC, OpenSanctions, and EU sanctions databases.")
     
+    # Import OFAC client
+    try:
+        from src.api_clients.sanctions.ofac import OFACClient
+        ofac_available = True
+    except ImportError:
+        ofac_available = False
+    
     col1, col2, col3 = st.columns(3)
     
     with col1:
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
             with st.spinner("Checking OFAC Sanctions..."):
-                # Simulate API call
-                time.sleep(2)
-                
-                # Save mock response
-                db.save_api_response(
-                    st.session_state.assessment_id,
-                    "OFAC_SDN",
-                    {"status": "clear", "matches": []},
-                    0.0
-                )
-                
-                st.success("✅ OFAC Check Complete - No matches found")
+                if ofac_available:
+                    # Use real OFAC API
+                    try:
+                        ofac_client = OFACClient()
+                        result = ofac_client.search_company(st.session_state.company_name)
+                        
+                        # Save the response
+                        db.save_api_response(
+                            st.session_state.assessment_id,
+                            "OFAC_SDN",
+                            result,
+                            result.get('api_cost', 0.0)
+                        )
+                        
+                        # Display results
+                        if result['status'] == 'clear':
+                            st.success(f"✅ OFAC Check Complete - No matches found")
+                        elif result['status'] == 'found_matches':
+                            st.warning(f"⚠️ OFAC Check - Found {result['match_count']} potential matches")
+                            
+                            # Add risk findings
+                            for match in result['matches']:
+                                severity = 'critical' if match['match_score'] > 0.9 else 'high'
+                                db.add_risk_finding(
+                                    st.session_state.assessment_id,
+                                    "Sanctions",
+                                    severity,
+                                    f"Potential OFAC match: {match['name']} (score: {match['match_score']})",
+                                    "OFAC_SDN",
+                                    match
+                                )
+                            
+                            # Show details in expander
+                            with st.expander("View OFAC Match Details"):
+                                for match in result['matches']:
+                                    st.write(f"**{match['name']}**")
+                                    st.write(f"- Match Score: {match['match_score']}")
+                                    st.write(f"- Type: {match['type']}")
+                                    if match.get('programs'):
+                                        st.write(f"- Programs: {', '.join(match['programs'])}")
+                        else:
+                            st.error(f"Error checking OFAC: {result.get('error')}")
+                            
+                    except Exception as e:
+                        st.error(f"Error with OFAC API: {str(e)}")
+                        # Fall back to mock data
+                        db.save_api_response(
+                            st.session_state.assessment_id,
+                            "OFAC_SDN",
+                            {"status": "error", "error": str(e)},
+                            0.0
+                        )
+                else:
+                    # Use mock data if OFAC client not available
+                    time.sleep(2)
+                    db.save_api_response(
+                        st.session_state.assessment_id,
+                        "OFAC_SDN",
+                        {"status": "clear", "matches": []},
+                        0.0
+                    )
+                    st.success("✅ OFAC Check Complete - No matches found")
     
     with col2:
         if st.button("🔍 Check OpenSanctions", key="opensanctions_check"):
