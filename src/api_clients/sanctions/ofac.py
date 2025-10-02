@@ -1,235 +1,283 @@
 # src/api_clients/sanctions/ofac.py
-import requests
 import csv
 import io
 import re
-from typing import Dict, List, Any
-from datetime import datetime
+import requests
+from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime, timedelta
 from xml.etree import ElementTree as ET
+
+try:
+    # Optional but helpful for robust retries
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+except Exception:
+    HTTPAdapter = None
+    Retry = None
+
 
 class OFACClient:
     """
     Client for searching OFAC's Specially Designated Nationals (SDN) list.
-    Uses OFAC's Sanctions List Service (SLS) endpoints.
-    This is FREE and requires no API key.
+    Pulls directly from OFAC's Sanctions List Service (SLS). No API key required.
     """
-    
+
     def __init__(self):
-        # OFAC's Sanctions List Service (SLS) base URL
+        # SLS base + canonical files
         self.sls_base = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports"
-        # Supported, stable formats
         self.sdn_csv_url = f"{self.sls_base}/SDN.CSV"
         self.sdn_xml_url = f"{self.sls_base}/SDN.XML"
         self.sdn_adv_xml_url = f"{self.sls_base}/SDN_ADVANCED.XML"
-        
-        # Required headers - OFAC requires User-Agent
+
+        # Headers (SLS rejects botless requests)
         self.headers = {
             "Accept": "*/*",
-            "User-Agent": "M&A-Risk-Assessment/1.0"
+            "User-Agent": "M-A-Risk-Assessment/1.0 (+contact@example.com)"
         }
-    
+
+        # Session with retries
+        self.session = requests.Session()
+        if HTTPAdapter and Retry:
+            retry = Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=(429, 500, 502, 503, 504),
+                allowed_methods=frozenset(["GET"])
+            )
+            self.session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        # Cache parsed entries to avoid refetching for batch checks
+        self._cache: Optional[Tuple[datetime, List[Dict[str, Any]]]] = None
+        self._cache_ttl = timedelta(hours=6)
+
+    # ---------------- Public API ----------------
+
     def search_company(self, company_name: str, threshold: float = 0.7) -> Dict[str, Any]:
         """
-        Search for a company in the OFAC SDN list.
-        
+        Search for company/vessel subjects on OFAC SDN.
+
         Args:
-            company_name: Name of the company to search
-            threshold: Minimum match score (0-1) to consider a match
-            
+            company_name: Name to search
+            threshold: Jaccard/containment threshold (0..1)
+
         Returns:
-            Dictionary with search results and any matches
+            Dict with status, matches, and metadata
         """
         try:
-            # Clean the company name
-            cleaned_name = self._clean_company_name(company_name)
-            
-            # Download and search the SDN list
-            matches = self._search_downloaded_list(cleaned_name, threshold)
-            
+            cleaned = self._clean_company_name(company_name)
+            entries = self._load_sdn_entities()  # cached
+
+            matches: List[Dict[str, Any]] = []
+            for e in entries:
+                score = self._calculate_match_score(cleaned, e.get("name", ""))
+                if score >= threshold:
+                    matches.append({
+                        "name": e.get("name", ""),
+                        "match_score": round(score, 2),
+                        "type": e.get("type", ""),
+                        "programs": e.get("programs", []),
+                        "aliases": e.get("aliases", []),
+                        "addresses": e.get("addresses", []),
+                        "ids": e.get("ids", []),
+                        "remarks": e.get("remarks", ""),
+                        "publishDate": e.get("publishDate", ""),
+                        "sdn_number": e.get("sdn_number", ""),
+                        "source": "OFAC SDN",
+                        "vessel_details": e.get("vessel_details", None)
+                    })
+
             return {
-                'searched_name': company_name,
-                'status': 'found_matches' if matches else 'clear',
-                'matches': matches,
-                'match_count': len(matches),
-                'search_timestamp': datetime.now().isoformat(),
-                'api_cost': 0.0  # Free API
+                "searched_name": company_name,
+                "status": "found_matches" if matches else "clear",
+                "matches": matches,
+                "match_count": len(matches),
+                "search_timestamp": datetime.utcnow().isoformat() + "Z",
+                "api_cost": 0.0,
             }
-            
+
         except Exception as e:
             return {
-                'searched_name': company_name,
-                'status': 'error',
-                'error': str(e),
-                'matches': [],
-                'match_count': 0,
-                'search_timestamp': datetime.now().isoformat(),
-                'api_cost': 0.0
+                "searched_name": company_name,
+                "status": "error",
+                "error": str(e),
+                "matches": [],
+                "match_count": 0,
+                "search_timestamp": datetime.utcnow().isoformat() + "Z",
+                "api_cost": 0.0,
             }
-    
-    def _search_downloaded_list(self, search_name: str, threshold: float) -> List[Dict]:
+
+    def check_multiple_companies(self, company_names: List[str]) -> List[Dict[str, Any]]:
         """
-        Download and search the OFAC SDN list
+        Batch check (uses cached list).
         """
-        # Try CSV first (simpler and complete)
+        results = []
+        for name in company_names:
+            results.append(self.search_company(name))
+        return results
+
+    # ---------------- Fetch & Normalize ----------------
+
+    def _load_sdn_entities(self) -> List[Dict[str, Any]]:
+        """
+        Load and normalize SDN entries (Entity & Vessel only).
+        CSV first for speed, then fallback to XML (classic or advanced).
+        """
+        # Serve from cache if fresh
+        if self._cache and (datetime.utcnow() - self._cache[0]) < self._cache_ttl:
+            return self._cache[1]
+
+        # Try CSV
         try:
-            response = requests.get(self.sdn_csv_url, headers=self.headers, timeout=60)
-            response.raise_for_status()
-            
-            matches = []
-            
-            # Parse CSV properly using csv module
-            csv_buffer = io.StringIO(response.text)
-            reader = csv.DictReader(csv_buffer)
-            
+            r = self.session.get(self.sdn_csv_url, headers=self.headers, timeout=90)
+            r.raise_for_status()
+            csv_buf = io.StringIO(r.text, newline="")
+            reader = csv.DictReader(csv_buf)
+
+            entities: List[Dict[str, Any]] = []
             for row in reader:
-                # OFAC CSV headers: ent_num, sdnName, sdnType, programList, title, callSign, 
-                # vesselType, tonnage, grossRegisteredTonnage, vesselFlag, vesselOwner, remarks
-                
-                sdn_type = (row.get('sdnType') or '').strip()
-                sdn_name = (row.get('sdnName') or '').strip()
-                
-                # Only look at entities and vessels, not individuals
-                if sdn_type in ['Entity', 'Vessel']:
-                    # Calculate match score
-                    score = self._calculate_match_score(search_name, sdn_name)
-                    
-                    if score >= threshold:
-                        matches.append({
-                            'name': sdn_name,
-                            'match_score': round(score, 2),
-                            'type': sdn_type,
-                            'programs': [p.strip() for p in (row.get('programList') or '').split(';') if p.strip()],
-                            'remarks': row.get('remarks', '').strip(),
-                            'source': 'OFAC SDN',
-                            'sdn_number': row.get('ent_num', '').strip(),
-                            'vessel_details': {
-                                'call_sign': row.get('callSign', '').strip(),
-                                'vessel_type': row.get('vesselType', '').strip(),
-                                'flag': row.get('vesselFlag', '').strip()
-                            } if sdn_type == 'Vessel' else None
-                        })
-            
-            return matches
-            
-        except Exception as csv_error:
-            print(f"CSV download failed: {csv_error}, trying XML...")
-            
-            # Fallback to XML
+                sdn_type = (row.get("sdnType") or "").strip()
+                if sdn_type not in {"Entity", "Vessel"}:
+                    continue
+
+                sdn_name = (row.get("sdnName") or "").strip()
+                if not sdn_name:
+                    continue
+
+                programs = [p.strip() for p in (row.get("programList") or "").split(";") if p.strip()]
+                remarks = (row.get("remarks") or "").strip()
+
+                rec: Dict[str, Any] = {
+                    "name": sdn_name,
+                    "type": sdn_type,
+                    "programs": programs,
+                    "remarks": remarks,
+                    "publishDate": (row.get("addListDate") or row.get("publicationDate") or "").strip(),
+                    "sdn_number": (row.get("ent_num") or "").strip(),
+                    "aliases": [],       # CSV doesn't carry AKA list in a structured way
+                    "addresses": [],     # CSV minimal — prefer XML for rich fields
+                    "ids": []
+                }
+
+                if sdn_type == "Vessel":
+                    rec["vessel_details"] = {
+                        "call_sign": (row.get("callSign") or "").strip(),
+                        "vessel_type": (row.get("vesselType") or "").strip(),
+                        "flag": (row.get("vesselFlag") or "").strip()
+                    }
+
+                entities.append(rec)
+
+            if entities:
+                self._cache = (datetime.utcnow(), entities)
+                return entities
+
+        except Exception:
+            # Fall through to XML
+            pass
+
+        # Fallback: parse classic XML first, then advanced XML if needed
+        for url in (self.sdn_xml_url, self.sdn_adv_xml_url):
             try:
-                response = requests.get(self.sdn_xml_url, headers=self.headers, timeout=60)
-                response.raise_for_status()
-                
-                return self._parse_xml_response(response.content, search_name, threshold)
-                
-            except Exception as xml_error:
-                print(f"XML download also failed: {xml_error}")
-                return []
-    
-    def _parse_xml_response(self, xml_content: bytes, search_name: str, threshold: float) -> List[Dict]:
+                r = self.session.get(url, headers=self.headers, timeout=120)
+                r.raise_for_status()
+                entities = self._parse_sdn_xml(r.content)
+                if entities:
+                    self._cache = (datetime.utcnow(), entities)
+                    return entities
+            except Exception:
+                continue
+
+        # No data available
+        self._cache = (datetime.utcnow(), [])
+        return []
+
+    # ---------------- XML Parsing ----------------
+
+    @staticmethod
+    def _local(tag: str) -> str:
+        """Return tag local name (strip namespace)."""
+        return tag.split("}", 1)[-1] if "}" in tag else tag
+
+    def _parse_sdn_xml(self, content: bytes) -> List[Dict[str, Any]]:
         """
-        Parse SDN XML format
+        Parse SDN.XML or SDN_ADVANCED.XML into normalized records.
+        Keeps Entity & Vessel only.
         """
-        matches = []
-        
-        try:
-            root = ET.fromstring(xml_content)
-            
-            # Determine namespace from root
-            ns = {'x': root.tag.split('}')[0].strip('{')} if '}' in root.tag else {}
-            
-            # Find all SDN entries
-            for entry in root.findall('.//sdnEntry', ns) or root.findall('.//x:sdnEntry', ns):
-                # Get SDN type
-                sdn_type_elem = entry.find('sdnType', ns) or entry.find('x:sdnType', ns)
-                sdn_type = sdn_type_elem.text.strip() if sdn_type_elem is not None else ''
-                
-                if sdn_type in ['Entity', 'Vessel']:
-                    # Get name - could be in different places
-                    name_elem = (entry.find('.//lastName', ns) or 
-                               entry.find('.//x:lastName', ns) or
-                               entry.find('lastName') or
-                               entry.find('x:lastName'))
-                    
-                    sdn_name = name_elem.text.strip() if name_elem is not None else ''
-                    
-                    if sdn_name:
-                        score = self._calculate_match_score(search_name, sdn_name)
-                        
-                        if score >= threshold:
-                            # Get programs
-                            programs = []
-                            for prog in entry.findall('.//program', ns) or entry.findall('.//x:program', ns):
-                                if prog.text:
-                                    programs.append(prog.text.strip())
-                            
-                            # Get remarks
-                            remarks_elem = entry.find('remarks', ns) or entry.find('x:remarks', ns)
-                            remarks = remarks_elem.text.strip() if remarks_elem is not None else ''
-                            
-                            matches.append({
-                                'name': sdn_name,
-                                'match_score': round(score, 2),
-                                'type': sdn_type,
-                                'programs': programs,
-                                'remarks': remarks,
-                                'source': 'OFAC SDN'
-                            })
-            
-        except Exception as e:
-            print(f"XML parsing error: {e}")
-            
-        return matches
-    
-    def _clean_company_name(self, name: str) -> str:
+        out: List[Dict[str, Any]] = []
+        root = ET.fromstring(content)
+
+        # The SLS XML uses namespaces; iterate generically on local names
+        for entry in root.iter():
+            if self._local(entry.tag).lower() == "sdnentry":
+                rec = self._parse_sdn_entry(entry)
+                if not rec:
+                    continue
+                if rec.get("type") in {"Entity", "Vessel"}:
+                    out.append(rec)
+
+        return out
+
+    def _parse_sdn_entry(self, node: ET.Element) -> Optional[Dict[str, Any]]:
         """
-        Clean and normalize company name for searching
+        Parse a single <sdnEntry> node.
         """
-        # Convert to uppercase (OFAC format is uppercase)
-        name = name.upper()
-        
-        # Remove common suffixes
-        suffixes = [
-            ' INC', ' LLC', ' LTD', ' LIMITED', ' CORP', ' CORPORATION',
-            ' COMPANY', ' CO', ' PLC', ' SA', ' AG', ' GMBH', ' BV',
-            ' OOO', ' OAO', ' PAO', ' ZAO', ' JSC', ' PJSC', ' OJSC'  # Russian entities
-        ]
-        
-        for suffix in suffixes:
-            if name.endswith(suffix):
-                name = name[:-len(suffix)].strip()
-        
-        # Remove special characters but keep spaces
-        name = re.sub(r'[^\w\s]', ' ', name)
-        
-        # Remove extra spaces
-        name = ' '.join(name.split())
-        
-        return name
-    
-    def _calculate_match_score(self, search_name: str, found_name: str) -> float:
-        """
-        Calculate similarity score between two company names
-        """
-        search_clean = self._clean_company_name(search_name)
-        found_clean = self._clean_company_name(found_name)
-        
-        # Exact match
-        if search_clean == found_clean:
-            return 1.0
-        
-        # One contains the other
-        if search_clean in found_clean or found_clean in search_clean:
-            return 0.9
-        
-        # Word overlap
-        search_words = set(search_clean.split())
-        found_words = set(found_clean.split())
-        
-        if not search_words or not found_words:
-            return 0.0
-        
-        # Calculate Jaccard similarity
-        overlap = len(search_words & found_words)
-        total = len(search_words | found_words)
-        
-        return overlap / total if total > 0 else 0.0
+        # sdnType
+        sdn_type = self._first_text(node, {"sdntype"}) or ""
+
+        # name: OFAC uses lastName for primary name in most org entries
+        name = self._first_text(node, {"lastname"}) or ""
+
+        # programs
+        programs = [t for t in self._all_texts(node, {"program"}) if t]
+
+        # remarks
+        remarks = self._first_text(node, {"remarks"}) or ""
+
+        # publish date
+        publish_date = self._first_text(node, {"publishdate"}) or ""
+
+        # ent num (sdn number)
+        sdn_number = self._first_text(node, {"uid"}) or ""  # some schemas use <uid>, CSV uses ent_num
+
+        # Aliases (akaList)
+        aliases: List[str] = []
+        for el in node.iter():
+            if self._local(el.tag).lower() in {"aka", "akaentity"}:
+                aka_name = self._first_text(el, {"lastname", "firstname", "name", "akaName"})
+                # Prefer whole name if provided
+                whole = self._first_text(el, {"wholename"})
+                alias = whole or aka_name
+                if alias:
+                    aliases.append(alias.strip())
+
+        # Addresses (addressList)
+        addresses: List[Dict[str, str]] = []
+        for el in node.iter():
+            if self._local(el.tag).lower() == "address":
+                addr = {
+                    "address1": self._first_text(el, {"address1"}),
+                    "address2": self._first_text(el, {"address2"}),
+                    "city": self._first_text(el, {"city"}),
+                    "state": self._first_text(el, {"state"}),
+                    "postal_code": self._first_text(el, {"postalcode", "zip"}),
+                    "country": self._first_text(el, {"country"})
+                }
+                if any(v for v in addr.values()):
+                    addresses.append(addr)
+
+        # IDs (idList)
+        ids_list: List[Dict[str, str]] = []
+        for el in node.iter():
+            if self._local(el.tag).lower() in {"id", "idnumber"}:
+                id_type = self._first_text(el, {"idtype"})
+                id_val = self._first_text(el, {"idnumber", "number", "value"})
+                if id_val:
+                    ids_list.append({"type": (id_type or "").strip(), "value": id_val.strip()})
+
+        rec: Dict[str, Any] = {
+            "name": name,
+            "type": sdn_type,
+            "programs": programs,
+            "remarks": remarks,
+            "publishDate": publish_date,
+            "s
