@@ -1,19 +1,15 @@
-# app.py
 import os
 import time
 from datetime import datetime
-
 import streamlit as st
-
 from src.database import SupabaseManager
-
 # === Optional AI summary (safe to disable if no API key) ===
 AI_SUMMARY_ENABLED = bool(os.environ.get("OPENAI_API_KEY"))
-
 # Renderers + AI explainer
 from app_components.sanctions_render import render_sanctions_result
 if AI_SUMMARY_ENABLED:
     from app_components.ai_explainer import explain_sanctions
+    from src.llm.openai_client import OpenAIClient  # NEW: For full report generation
 
 # -----------------------------------------------------------------------------
 # Page config
@@ -23,7 +19,6 @@ st.set_page_config(
     page_icon="🔍",
     layout="wide",
 )
-
 # -----------------------------------------------------------------------------
 # Session state
 # -----------------------------------------------------------------------------
@@ -36,7 +31,6 @@ state_defaults = {
 for k, v in state_defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
-
 # -----------------------------------------------------------------------------
 # Database
 # -----------------------------------------------------------------------------
@@ -47,9 +41,7 @@ def get_db():
     except Exception as e:
         st.error(f"Database connection error: {str(e)}")
         return None
-
 db = get_db()
-
 # -----------------------------------------------------------------------------
 # Sidebar
 # -----------------------------------------------------------------------------
@@ -61,12 +53,10 @@ if st.session_state.assessment_id:
         for k, v in state_defaults.items():
             st.session_state[k] = v
         st.rerun()
-
 # -----------------------------------------------------------------------------
 # Main
 # -----------------------------------------------------------------------------
 st.title("M&A Risk Assessment Tool")
-
 if not db:
     st.error("Please configure your Supabase credentials to continue.")
     st.markdown(
@@ -81,7 +71,6 @@ if not db:
         """
     )
     st.stop()
-
 # -----------------------------------------------------------------------------
 # Step 1: Company Information
 # -----------------------------------------------------------------------------
@@ -94,7 +83,6 @@ if st.session_state.step == 1:
             ["", "Healthcare", "Financial Services", "Energy", "Technology", "Manufacturing", "Retail", "Other"],
         )
         submitted = st.form_submit_button("Start Assessment")
-
         if submitted and company_name:
             try:
                 assessment_id = db.create_assessment(
@@ -109,7 +97,6 @@ if st.session_state.step == 1:
                 st.rerun()
             except Exception as e:
                 st.error(f"Error creating assessment: {str(e)}")
-
 # -----------------------------------------------------------------------------
 # Step 2: Sanctions Check
 # -----------------------------------------------------------------------------
@@ -117,7 +104,6 @@ elif st.session_state.step == 2:
     st.header("Step 2: Sanctions Check")
     st.subheader(f"Checking: {st.session_state.company_name}")
     st.info("This step checks OFAC, OpenSanctions, and EU sanctions databases.")
-
     # Lazy imports so the app loads even if a client is missing
     try:
         from src.api_clients.sanctions.ofac import OFACClient
@@ -125,21 +111,17 @@ elif st.session_state.step == 2:
     except Exception as e:
         st.error(f"OFAC client import error: {e}")
         ofac_available = False
-
     try:
         from src.api_clients.sanctions.opensanctions import OpenSanctionsClient
         opensanctions_available = True
     except Exception:
         opensanctions_available = False
-
     try:
         from src.api_clients.sanctions.eu_sanctions import EUSanctionsClient
         eu_available = True
     except Exception:
         eu_available = False
-
     col1, col2, col3 = st.columns(3)
-
     # --- OFAC ---
     with col1:
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
@@ -148,7 +130,6 @@ elif st.session_state.step == 2:
                     try:
                         client = OFACClient()
                         ofac_res = client.search_company(st.session_state.company_name)
-
                         # persist
                         db.save_api_response(
                             st.session_state.assessment_id,
@@ -156,10 +137,8 @@ elif st.session_state.step == 2:
                             ofac_res,
                             ofac_res.get("api_cost", 0.0),
                         )
-
                         # render
                         render_sanctions_result("OFAC (SDN)", ofac_res)
-
                         # risk findings
                         if ofac_res.get("status") == "found_matches":
                             for m in ofac_res.get("matches", []):
@@ -176,7 +155,6 @@ elif st.session_state.step == 2:
                             st.success("✅ OFAC Check Complete — No matches found")
                         else:
                             st.error(f"Error checking OFAC: {ofac_res.get('error')}")
-
                     except Exception as e:
                         st.error(f"Error with OFAC API: {str(e)}")
                         db.save_api_response(
@@ -188,7 +166,6 @@ elif st.session_state.step == 2:
                         st.session_state.assessment_id, "OFAC_SDN", {"status": "clear", "matches": []}, 0.0
                     )
                     st.success("✅ OFAC Check Complete — No matches found")
-
     # --- OpenSanctions ---
     with col2:
         if st.button("🔍 Check OpenSanctions", key="opensanctions_check"):
@@ -197,7 +174,6 @@ elif st.session_state.step == 2:
                     try:
                         os_client = OpenSanctionsClient()
                         os_res = os_client.search_company(st.session_state.company_name)
-
                         db.save_api_response(
                             st.session_state.assessment_id,
                             "OpenSanctions",
@@ -205,7 +181,6 @@ elif st.session_state.step == 2:
                             os_res.get("api_cost", 0.0),
                         )
                         render_sanctions_result("OpenSanctions", os_res)
-
                         if os_res.get("status") == "found_matches":
                             for m in os_res.get("matches", []):
                                 sev = "critical" if (m.get("match_score") or 0) > 0.9 else "high"
@@ -223,7 +198,6 @@ elif st.session_state.step == 2:
                             st.success("✅ OpenSanctions Check Complete — No matches found")
                         else:
                             st.error(f"Error checking OpenSanctions: {os_res.get('error')}")
-
                     except Exception as e:
                         st.error(f"Error with OpenSanctions API: {str(e)}")
                         db.save_api_response(
@@ -238,7 +212,6 @@ elif st.session_state.step == 2:
                         st.session_state.assessment_id, "OpenSanctions", {"status": "clear", "matches": []}, 0.0
                     )
                     st.success("✅ OpenSanctions Check Complete — No matches found")
-
     # --- EU ---
     with col3:
         if st.button("🔍 Check EU Sanctions", key="eu_check"):
@@ -247,7 +220,6 @@ elif st.session_state.step == 2:
                     try:
                         eu_client = EUSanctionsClient()
                         eu_res = eu_client.search_company(st.session_state.company_name)
-
                         db.save_api_response(
                             st.session_state.assessment_id,
                             "EU_Sanctions",
@@ -255,7 +227,6 @@ elif st.session_state.step == 2:
                             eu_res.get("api_cost", 0.0),
                         )
                         render_sanctions_result("EU Consolidated List", eu_res)
-
                         if eu_res.get("status") == "found_matches":
                             for m in eu_res.get("matches", []):
                                 sev = "critical" if (m.get("match_score") or 0) > 0.9 else "high"
@@ -271,7 +242,6 @@ elif st.session_state.step == 2:
                             st.success("✅ EU Sanctions Check Complete — No matches found")
                         else:
                             st.error(f"Error checking EU Sanctions: {eu_res.get('error')}")
-
                     except Exception as e:
                         st.error(f"Error with EU Sanctions API: {str(e)}")
                         db.save_api_response(
@@ -286,7 +256,6 @@ elif st.session_state.step == 2:
                         st.session_state.assessment_id, "EU_Sanctions", {"status": "clear", "matches": []}, 0.0
                     )
                     st.success("✅ EU Sanctions Check Complete — No matches found")
-
     # -------- Optional AI Summary (grounded, structured) --------
     st.markdown("---")
     if AI_SUMMARY_ENABLED:
@@ -298,7 +267,6 @@ elif st.session_state.step == 2:
                 ofac_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OFAC_SDN"), {})
                 eu_res = next((r["response_data"] for r in api_responses if r["api_name"] == "EU_Sanctions"), {})
                 os_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OpenSanctions"), {})
-
                 try:
                     ai = explain_sanctions(st.session_state.company_name, ofac_res, eu_res, os_res)
                     st.subheader("AI Summary")
@@ -310,12 +278,10 @@ elif st.session_state.step == 2:
                     st.error(f"AI summary failed: {e}")
     else:
         st.caption("Set OPENAI_API_KEY to enable AI summarization.")
-
     st.markdown("---")
     if st.button("Continue to Legal/Litigation Check →", type="primary"):
         st.session_state.step = 3
         st.rerun()
-
 # -----------------------------------------------------------------------------
 # Step 3: Legal/Litigation
 # -----------------------------------------------------------------------------
@@ -323,9 +289,7 @@ elif st.session_state.step == 3:
     st.header("Step 3: Legal & Litigation Check")
     st.subheader(f"Checking: {st.session_state.company_name}")
     st.warning("⚠️ PACER searches may incur costs (up to $50 limit)")
-
     col1, col2 = st.columns(2)
-
     with col1:
         if st.button("🔍 Search PACER", key="pacer_check"):
             with st.spinner("Searching federal court records…"):
@@ -340,7 +304,6 @@ elif st.session_state.step == 3:
                 )
                 db.update_assessment_status(st.session_state.assessment_id, "in_progress", st.session_state.total_cost)
                 st.success(f"✅ PACER Search Complete — Cost: ${pacer_cost:.2f}")
-
     with col2:
         if st.button("🔍 Check USPTO", key="uspto_check"):
             with st.spinner("Checking patents and trademarks…"):
@@ -349,12 +312,10 @@ elif st.session_state.step == 3:
                     st.session_state.assessment_id, "USPTO", {"patents": 5, "trademarks": 3}, 0.0
                 )
                 st.success("✅ USPTO Check Complete")
-
     st.markdown("---")
     if st.button("Continue to Regulatory Check →", type="primary"):
         st.session_state.step = 4
         st.rerun()
-
 # -----------------------------------------------------------------------------
 # Step 4: Regulatory Compliance
 # -----------------------------------------------------------------------------
@@ -362,9 +323,7 @@ elif st.session_state.step == 4:
     st.header("Step 4: Regulatory Compliance")
     st.subheader(f"Checking: {st.session_state.company_name}")
     st.info("Checking EPA, OSHA, and FDA compliance records…")
-
     col1, col2, col3 = st.columns(3)
-
     with col1:
         if st.button("🔍 Check EPA ECHO", key="epa_check"):
             with st.spinner("Checking environmental compliance…"):
@@ -373,7 +332,6 @@ elif st.session_state.step == 4:
                     st.session_state.assessment_id, "EPA_ECHO", {"violations": 0, "inspections": 3}, 0.0
                 )
                 st.success("✅ EPA Check Complete")
-
     with col2:
         if st.button("🔍 Check OSHA", key="osha_check"):
             with st.spinner("Checking workplace safety records…"):
@@ -390,29 +348,24 @@ elif st.session_state.step == 4:
                     {"violation_type": "record_keeping"},
                 )
                 st.success("✅ OSHA Check Complete")
-
     with col3:
         if st.button("🔍 Check FDA", key="fda_check"):
             with st.spinner("Checking FDA compliance…"):
                 time.sleep(1.0)
                 db.save_api_response(st.session_state.assessment_id, "FDA", {"status": "not_applicable"}, 0.0)
                 st.info("ℹ️ FDA — Not applicable for this industry")
-
     st.markdown("---")
     if st.button("Continue to Final Report →", type="primary"):
         st.session_state.step = 5
         st.rerun()
-
 # -----------------------------------------------------------------------------
 # Step 5: Final Report
 # -----------------------------------------------------------------------------
 elif st.session_state.step == 5:
     st.header("Step 5: Risk Assessment Report")
     st.subheader(f"Company: {st.session_state.company_name}")
-
     findings = db.get_assessment_findings(st.session_state.assessment_id)
     api_responses = db.get_api_responses(st.session_state.assessment_id)
-
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("APIs Checked", len(api_responses))
@@ -423,9 +376,7 @@ elif st.session_state.step == 5:
         st.metric("High/Critical Risks", high_risk)
     with col4:
         st.metric("Total Cost", f"${st.session_state.total_cost:.2f}")
-
     st.markdown("---")
-
     if findings:
         st.subheader("Risk Findings")
         severity_icon = {"low": "🟢", "medium": "🟡", "high": "🟠", "critical": "🔴"}
@@ -436,21 +387,53 @@ elif st.session_state.step == 5:
             st.markdown("")
     else:
         st.success("✅ No significant risk findings identified")
-
     st.subheader("API Check Results")
     for resp in api_responses:
         with st.expander(f"{resp['api_name']} — {resp['fetched_at'][:10]}"):
             st.json(resp["response_data"])
-
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📄 Generate Detailed Report", type="primary"):
-            st.info("LLM report generation would go here — connect your writer to summarize all stages.")
+            st.info("Generating AI-powered summary report...")
+            # NEW: Pull assessment details (industry from DB or session)
+            assessment = db.get_assessment(st.session_state.assessment_id)  # Assume this method exists; add if needed
+            industry = assessment.get("industry", "Unknown")
+            if AI_SUMMARY_ENABLED:
+                with st.spinner("Generating report with OpenAI..."):
+                    try:
+                        llm = OpenAIClient(os.environ.get("OPENAI_API_KEY"))
+                        report = llm.generate_full_report(findings, api_responses, st.session_state.company_name, industry)
+                        st.session_state.total_cost += report["cost"]
+                        # Store full report as an "API response" for persistence
+                        db.save_api_response(
+                            st.session_state.assessment_id,
+                            "LLM_Report",
+                            report,
+                            report["cost"]
+                        )
+                        # Display structured sections
+                        st.subheader("AI-Generated Report")
+                        st.markdown("### Executive Summary")
+                        st.markdown(report["full_report"].split("**Key Risks**")[0].strip() if "**Key Risks**" in report["full_report"] else report["full_report"])
+                        st.markdown("### Key Risks")
+                        st.write(report["key_risks"])
+                        st.markdown(f"### Overall Risk Score")
+                        st.metric("Risk Level", report["overall_risk_score"])
+                        st.markdown("### Recommendations")
+                        st.write(report["recommendations"])
+                        with st.expander("Full Report (Markdown)"):
+                            st.markdown(report["full_report"])
+                        st.caption(f"Report generation cost: ${report['cost']:.4f}")
+                    except Exception as e:
+                        st.error(f"Report generation failed: {e}")
+            else:
+                st.warning("Set OPENAI_API_KEY to enable AI report generation.")
+                basic_report = f"Manual summary for {st.session_state.company_name}: {len(findings)} risks found across {len(api_responses)} checks. Review details above."
+                st.write(basic_report)
     with col2:
         if st.button("✅ Complete Assessment"):
             db.update_assessment_status(st.session_state.assessment_id, "completed", st.session_state.total_cost)
             st.success("Assessment completed!")
-
 # Footer
 st.markdown("---")
 st.caption("M&A Risk Assessment Tool v1.0")
