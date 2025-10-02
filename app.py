@@ -120,15 +120,38 @@ elif st.session_state.step == 2:
     col1, col2 = st.columns(2)
     
     # OFAC Section (persistent summary + button)
+        # OFAC Section (persistent summary + pagination button)
     with col1:
-        # Persistent OFAC summary (AI-generated plain text)
+        # Initialize pagination if not set
+        if 'ofac_page' not in st.session_state:
+            st.session_state.ofac_page = 1
+            st.session_state.ofac_full_matches = []  # Store all matches
+        
+        # Persistent OFAC summary (initial + batches)
         if st.session_state.get('ofac_summary'):
             st.subheader("OFAC Summary")
             st.write(st.session_state.ofac_summary)
         
-        # --- OFAC Button ---
+        # Pagination button (dynamic label)
+        ofac_res = st.session_state.get('ofac_result', {})
+        match_count = ofac_res.get('match_count', 0)
+        current_page = st.session_state.ofac_page
+        batch_size = 10
+        remaining = max(0, match_count - (current_page * batch_size))
+        if remaining > 0:
+            if st.button(f"Display More OFAC ({remaining} left)", key="more_ofac"):
+                with st.spinner("Generating next batch…"):
+                    batch_summary = explain_batch(st.session_state.company_name, ofac_res, (current_page - 1) * batch_size, batch_size, "OFAC")
+                    st.session_state.ofac_summary += f"\n\nNext batch:\n{batch_summary}"
+                    st.session_state.ofac_page += 1
+                    st.session_state.total_cost += 0.002
+                    st.rerun()
+        elif current_page > 1:
+            st.info("All OFAC results summarized.")
+        
+        # --- Initial OFAC Button ---
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
-            with st.spinner("Checking OFAC and generating summary…"):
+            with st.spinner("Checking OFAC and generating initial summary…"):
                 if ofac_available:
                     try:
                         client = OFACClient()
@@ -155,7 +178,8 @@ elif st.session_state.step == 2:
                                     "OFAC_SDN",
                                     m,
                                 )
-                        # Generate AI summary immediately
+                        # Generate initial AI summary (first 10)
+                        st.session_state.ofac_page = 1
                         st.session_state.ofac_summary = explain_ofac(st.session_state.company_name, ofac_res)
                         st.rerun()
                     except Exception as e:
@@ -174,16 +198,38 @@ elif st.session_state.step == 2:
                     )
                     st.rerun()
     
-    # OpenSanctions Section (persistent summary + button)
+    # OpenSanctions Section (persistent summary + pagination button)
     with col2:
-        # Persistent OpenSanctions summary (AI-generated plain text)
+        # Initialize pagination if not set
+        if 'os_page' not in st.session_state:
+            st.session_state.os_page = 1
+            st.session_state.os_full_matches = []  # Store all matches
+        
+        # Persistent OpenSanctions summary (initial + batches)
         if st.session_state.get('os_summary'):
             st.subheader("OpenSanctions Summary")
             st.write(st.session_state.os_summary)
         
-        # --- OpenSanctions Button ---
+        # Pagination button (dynamic label)
+        os_res = st.session_state.get('os_result', {})
+        match_count = os_res.get('match_count', 0)
+        current_page = st.session_state.os_page
+        batch_size = 10
+        remaining = max(0, match_count - (current_page * batch_size))
+        if remaining > 0:
+            if st.button(f"Display More OpenSanctions ({remaining} left)", key="more_os"):
+                with st.spinner("Generating next batch…"):
+                    batch_summary = explain_batch(st.session_state.company_name, os_res, (current_page - 1) * batch_size, batch_size, "OpenSanctions")
+                    st.session_state.os_summary += f"\n\nNext batch:\n{batch_summary}"
+                    st.session_state.os_page += 1
+                    st.session_state.total_cost += 0.002
+                    st.rerun()
+        elif current_page > 1:
+            st.info("All OpenSanctions results summarized.")
+        
+        # --- Initial OpenSanctions Button ---
         if st.button("🔍 Check OpenSanctions", key="opensanctions_check"):
-            with st.spinner("Checking OpenSanctions and generating summary…"):
+            with st.spinner("Checking OpenSanctions and generating initial summary…"):
                 if opensanctions_available:
                     try:
                         os_client = OpenSanctionsClient(os.getenv("OPENSANCTIONS_API_KEY"))
@@ -211,7 +257,8 @@ elif st.session_state.step == 2:
                                     "OpenSanctions",
                                     m,
                                 )
-                        # Generate AI summary immediately
+                        # Generate initial AI summary (first 10)
+                        st.session_state.os_page = 1
                         st.session_state.os_summary = explain_os(st.session_state.company_name, os_res)
                         st.rerun()
                     except Exception as e:
@@ -224,6 +271,38 @@ elif st.session_state.step == 2:
                             0.0,
                         )
                         st.rerun()
+                else:
+                    st.session_state.os_summary = "OpenSanctions check not available—no results."
+                    st.session_state.os_result = {"status": "clear", "matches": []}
+                    time.sleep(1)
+                    db.save_api_response(
+                        st.session_state.assessment_id, "OpenSanctions", st.session_state.os_result, 0.0
+                    )
+                    st.rerun()
+    
+    # Combined summary button
+    st.markdown("---")
+    if AI_SUMMARY_ENABLED and st.session_state.get('ofac_result') and st.session_state.get('os_result'):
+        if st.button("🧠 Summarize Both Sanctions Findings"):
+            with st.spinner("Combining summaries…"):
+                try:
+                    combined = explain_sanctions(st.session_state.company_name, st.session_state.ofac_result, st.session_state.os_result)
+                    st.session_state.combined_summary = combined
+                    st.session_state.total_cost += 0.002  # ~$0.002 for combined
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Combined summary failed: {e}")
+    
+    # Persistent combined summary
+    if st.session_state.get('combined_summary'):
+        st.subheader("Combined Sanctions Summary")
+        st.write(st.session_state.combined_summary)
+        st.caption("Cost: +$0.002")
+    
+    st.markdown("---")
+    if st.button("Continue to Legal/Litigation Check →", type="primary"):
+        st.session_state.step = 3
+        st.rerun()
                 else:
                     st.session_state.os_summary = "OpenSanctions check not available—no results."
                     st.session_state.os_result = {"status": "clear", "matches": []}
