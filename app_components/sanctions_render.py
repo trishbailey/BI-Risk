@@ -86,7 +86,7 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
 
     for m in matches:
         # NOTE: st.container(border=True) requires Streamlit >= 1.31; remove border= if on older versions
-        with st.container(border=True):
+        with st.container:
             title = m.get("name") or "(no name)"
             st.markdown(f"### {esc(title)}")
 
