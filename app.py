@@ -117,25 +117,22 @@ elif st.session_state.step == 2:
     except Exception:
         opensanctions_available = False
     # REMOVED: EU Sanctions column and logic (redundant with OpenSanctions)
-    col1, col2 = st.columns(2)  # Now 2 columns instead of 3
-    # Persistent display for OFAC (shows after click, stays)
-    if st.session_state.get('ofac_result'):
-        with col1:
-            render_sanctions_result("OFAC (SDN)", st.session_state.ofac_result)
-            if st.session_state.ofac_result.get("status") == "clear":
-                st.success("✅ OFAC Check Complete — No matches found")
-            elif st.session_state.ofac_result.get("status") == "error":
-                st.error(f"Error: {st.session_state.ofac_result.get('error')}")
+        col1, col2 = st.columns(2)  # Now 2 columns instead of 3
+    
+    # Persistent OFAC summary (AI-generated plain text)
+    if st.session_state.get('ofac_summary'):
+        st.subheader("OFAC Summary")
+        st.write(st.session_state.ofac_summary)
     
     # --- OFAC Button ---
     with col1:
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
-            with st.spinner("Checking OFAC Sanctions…"):
+            with st.spinner("Checking OFAC and generating summary…"):
                 if ofac_available:
                     try:
                         client = OFACClient()
                         ofac_res = client.search_company(st.session_state.company_name)
-                        # Store in session_state for persistence
+                        # Store result
                         st.session_state.ofac_result = ofac_res
                         # persist to DB
                         db.save_api_response(
@@ -145,7 +142,7 @@ elif st.session_state.step == 2:
                             ofac_res.get("api_cost", 0.0),
                         )
                         st.session_state.total_cost += ofac_res.get("api_cost", 0.0)
-                        # risk findings
+                        # risk findings (keep for DB)
                         if ofac_res.get("status") == "found_matches":
                             for m in ofac_res.get("matches", []):
                                 sev = "critical" if (m.get("match_score") or 0) > 0.9 else "high"
@@ -153,45 +150,43 @@ elif st.session_state.step == 2:
                                     st.session_state.assessment_id,
                                     "Sanctions",
                                     sev,
-                                    f"Potential OFAC match: {m.get('name')} (score: {m.get('match_score')})",
+                                    f"Potential OFAC match: {m.get('name')}",
                                     "OFAC_SDN",
                                     m,
                                 )
-                        st.rerun()  # Refresh to show persistent result
+                        # Generate AI summary immediately
+                        st.session_state.ofac_summary = explain_ofac(st.session_state.company_name, ofac_res)
+                        st.rerun()
                     except Exception as e:
+                        st.session_state.ofac_summary = f"Error with OFAC: {str(e)}"
                         st.session_state.ofac_result = {"status": "error", "error": str(e)}
                         db.save_api_response(
                             st.session_state.assessment_id, "OFAC_SDN", st.session_state.ofac_result, 0.0
                         )
-                        st.error(f"Error with OFAC API: {str(e)}")
                         st.rerun()
                 else:
+                    st.session_state.ofac_summary = "OFAC check not available—no results."
                     st.session_state.ofac_result = {"status": "clear", "matches": []}
                     time.sleep(1)
                     db.save_api_response(
                         st.session_state.assessment_id, "OFAC_SDN", st.session_state.ofac_result, 0.0
                     )
-                    st.success("✅ OFAC Check Complete — No matches found")
                     st.rerun()
     
-    # Persistent display for OpenSanctions (shows after click, stays)
-    if st.session_state.get('os_result'):
-        with col2:
-            render_sanctions_result("OpenSanctions", st.session_state.os_result)
-            if st.session_state.os_result.get("status") == "clear":
-                st.success("✅ OpenSanctions Check Complete — No matches found")
-            elif st.session_state.os_result.get("status") == "error":
-                st.error(f"Error: {st.session_state.os_result.get('error')}")
+    # Persistent OpenSanctions summary (AI-generated plain text)
+    if st.session_state.get('os_summary'):
+        st.subheader("OpenSanctions Summary")
+        st.write(st.session_state.os_summary)
     
     # --- OpenSanctions Button ---
     with col2:
         if st.button("🔍 Check OpenSanctions", key="opensanctions_check"):
-            with st.spinner("Checking OpenSanctions…"):
+            with st.spinner("Checking OpenSanctions and generating summary…"):
                 if opensanctions_available:
                     try:
-                        os_client = OpenSanctionsClient(os.getenv("OPENSANCTIONS_API_KEY"))  # Pass key for paid
+                        os_client = OpenSanctionsClient(os.getenv("OPENSANCTIONS_API_KEY"))
                         os_res = os_client.search_company(st.session_state.company_name)
-                        # Store in session_state for persistence
+                        # Store result
                         st.session_state.os_result = os_res
                         # persist to DB
                         db.save_api_response(
@@ -201,7 +196,7 @@ elif st.session_state.step == 2:
                             os_res.get("api_cost", 0.0),
                         )
                         st.session_state.total_cost += os_res.get("api_cost", 0.0)
-                        # risk findings
+                        # risk findings (keep for DB)
                         if os_res.get("status") == "found_matches":
                             for m in os_res.get("matches", []):
                                 sev = "critical" if (m.get("match_score") or 0) > 0.9 else "high"
@@ -210,13 +205,15 @@ elif st.session_state.step == 2:
                                     st.session_state.assessment_id,
                                     "Sanctions",
                                     sev,
-                                    f"Potential match in OpenSanctions: {m.get('name')} (score: {m.get('match_score')})"
-                                    + (f" — Programs: {programs_str}" if programs_str else ""),
+                                    f"Potential match in OpenSanctions: {m.get('name')} — Programs: {programs_str}",
                                     "OpenSanctions",
                                     m,
                                 )
-                        st.rerun()  # Refresh to show persistent result
+                        # Generate AI summary immediately
+                        st.session_state.os_summary = explain_os(st.session_state.company_name, os_res)
+                        st.rerun()
                     except Exception as e:
+                        st.session_state.os_summary = f"Error with OpenSanctions: {str(e)}"
                         st.session_state.os_result = {"status": "error", "error": str(e)}
                         db.save_api_response(
                             st.session_state.assessment_id,
@@ -224,37 +221,35 @@ elif st.session_state.step == 2:
                             st.session_state.os_result,
                             0.0,
                         )
-                        st.error(f"Error with OpenSanctions API: {str(e)}")
                         st.rerun()
                 else:
+                    st.session_state.os_summary = "OpenSanctions check not available—no results."
                     st.session_state.os_result = {"status": "clear", "matches": []}
                     time.sleep(1)
                     db.save_api_response(
                         st.session_state.assessment_id, "OpenSanctions", st.session_state.os_result, 0.0
                     )
-                    st.success("✅ OpenSanctions Check Complete — No matches found")
                     st.rerun()
     
-    # -------- Optional AI Summary (draws from both DB entries) --------
+    # Combined summary button
     st.markdown("---")
-    if AI_SUMMARY_ENABLED:
-        if st.button("🧠 Summarize Sanctions Findings with OpenAI"):
-            with st.spinner("Analyzing results…"):
-                # Pull the latest responses we just saved (from both APIs)
-                api_responses = db.get_api_responses(st.session_state.assessment_id)
-                # Map by name for the explainer (EU removed)
-                ofac_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OFAC_SDN"), {})
-                os_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OpenSanctions"), {})
+    if AI_SUMMARY_ENABLED and st.session_state.get('ofac_result') and st.session_state.get('os_result'):
+        if st.button("🧠 Summarize Both Sanctions Findings"):
+            with st.spinner("Combining summaries…"):
                 try:
-                    ai = explain_sanctions(st.session_state.company_name, ofac_res, os_res)
-                    st.subheader("Factual Sanctions Summary")
-                    st.write(ai["overall_assessment"])  # Plain text
-                    with st.expander("Details (JSON)"):
-                        st.json(ai["details"])  # Keep JSON hidden in expander
+                    combined = explain_sanctions(st.session_state.company_name, st.session_state.ofac_result, st.session_state.os_result)
+                    st.session_state.combined_summary = combined
+                    st.session_state.total_cost += 0.002  # ~$0.002 for combined
+                    st.rerun()
                 except Exception as e:
-                    st.error(f"AI summary failed: {e}")
-    else:
-        st.caption("Set OPENAI_API_KEY to enable AI summarization.")
+                    st.error(f"Combined summary failed: {e}")
+    
+    # Persistent combined summary
+    if st.session_state.get('combined_summary'):
+        st.subheader("Combined Sanctions Summary")
+        st.write(st.session_state.combined_summary)
+        st.caption("Cost: +$0.002")
+    
     st.markdown("---")
     if st.button("Continue to Legal/Litigation Check →", type="primary"):
         st.session_state.step = 3
