@@ -19,16 +19,15 @@ except Exception:
 class EUSanctionsClient:
     """
     Client for searching the EU Consolidated Financial Sanctions List.
-    Fetches the official XML v1.1 (preferred) or CSV, normalizes Entities only.
+    Fetches official XML v1.1 (preferred) or CSV. Returns Entities only.
     """
 
     def __init__(self):
-        # Primary (often OK)
+        # Primary EU FSF endpoints
         self.xml_v11_primary = "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content"
         self.csv_primary = "https://webgate.ec.europa.eu/fsd/fsf/public/files/csvFullSanctionsList/content"
 
-        # Public-token fallbacks (commonly used by integrators to avoid 403)
-        # token=dG9rZW4tMjAxNw (base64 for "token-2017")
+        # Tokenized fallbacks (prevent sporadic 403s on some edges)
         self.xml_v11_token = (
             "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
         )
@@ -36,7 +35,6 @@ class EUSanctionsClient:
             "https://webgate.ec.europa.eu/fsd/fsf/public/files/csvFullSanctionsList/content?token=dG9rZW4tMjAxNw"
         )
 
-        # Headers: some FSF edges 403 if headers look “non-browser”
         self.headers = {
             "Accept": "application/xml,text/xml,application/json,text/csv,*/*",
             "Accept-Language": "en-US,en;q=0.9",
@@ -45,7 +43,6 @@ class EUSanctionsClient:
             "Connection": "keep-alive",
         }
 
-        # Session + retries
         self.session = requests.Session()
         if HTTPAdapter and Retry:
             retry = Retry(
@@ -56,11 +53,10 @@ class EUSanctionsClient:
             )
             self.session.mount("https://", HTTPAdapter(max_retries=retry))
 
-        # Cache
         self._cache: Optional[Tuple[datetime, List[Dict[str, Any]]]] = None
         self._cache_ttl = timedelta(hours=6)
 
-    # ----------------------- Public API -----------------------
+    # ---------------- Public API ----------------
 
     def search_company(self, company_name: str, threshold: float = 0.7) -> Dict[str, Any]:
         try:
@@ -112,7 +108,7 @@ class EUSanctionsClient:
             results.append(self.search_company(company))
         return results
 
-    # ----------------------- Fetch & Parse -----------------------
+    # ---------------- Fetch & Parse ----------------
 
     def _get_first_success(self, urls: List[str]) -> Optional[requests.Response]:
         for url in urls:
@@ -128,7 +124,7 @@ class EUSanctionsClient:
         if self._cache and (datetime.utcnow() - self._cache[0]) < self._cache_ttl:
             return self._cache[1]
 
-        # Try XML v1.1 first (primary, then token)
+        # Prefer XML v1.1 (primary → token)
         xml_resp = self._get_first_success([self.xml_v11_primary, self.xml_v11_token])
         if xml_resp is not None:
             try:
@@ -137,39 +133,68 @@ class EUSanctionsClient:
                 self._cache = (datetime.utcnow(), entities)
                 return entities
             except Exception:
-                # fall through to CSV if parsing fails
-                pass
+                pass  # fall through to CSV
 
-        # Fallback: CSV (primary, then token)
+        # Fallback to CSV (primary → token)
         csv_resp = self._get_first_success([self.csv_primary, self.csv_token])
         if csv_resp is not None:
             try:
-                return self._parse_csv_entities(csv_resp.text)
+                entities = self._parse_csv_entities(csv_resp.text)
+                self._cache = (datetime.utcnow(), entities)
+                return entities
             except Exception:
                 pass
 
-        # Nothing worked
         self._cache = (datetime.utcnow(), [])
         return []
 
-    # ----------------------- Parse: XML & CSV -----------------------
+    # ---------------- Parse: XML & CSV ----------------
+
+    def _parse_xml_entities(self, root: ET.Element) -> List[Dict[str, Any]]:
+        """
+        v1.1 exports have top-level or nested <sanctionEntity> elements.
+        Select them directly, namespace-agnostic: .//{*}sanctionEntity
+        """
+        entities: List[Dict[str, Any]] = []
+        for node in root.findall(".//{*}sanctionEntity"):
+            ent = self._parse_subject(node)
+            if not ent:
+                continue
+            # Entities only (person records are under sanctionPerson)
+            if ent.get("entity_type", "").lower() in {"entity", "vessel", "aircraft", "group", "undertaking"}:
+                if ent.get("name"):
+                    entities.append(ent)
+        return entities
 
     def _parse_csv_entities(self, csv_text: str) -> List[Dict[str, Any]]:
+        """
+        CSV header names vary; handle common variants.
+        """
         out: List[Dict[str, Any]] = []
-        reader = csv.DictReader(StringIO(csv_text))
-        for row in reader:
-            # CSV headers commonly: subjectType, euReferenceNumber, nameAlias.wholeName (flattened variants vary)
+        rdr = csv.DictReader(StringIO(csv_text))
+        for row in rdr:
+            # Subject type
             subj_type = (row.get("subjectType") or row.get("subjectTypeCode") or "").strip()
-            if subj_type.lower() in {"person", "individual"}:
-                continue  # entities only
+            if subj_type and subj_type.lower() in {"person", "individual"}:
+                continue
 
-            name = (row.get("nameAlias.wholeName") or row.get("wholeName") or row.get("name") or "").strip()
+            # Name variants
+            name = (
+                row.get("NameAlias_WholeName") or
+                row.get("nameAlias.wholeName") or
+                row.get("nameAliasWholeName") or
+                row.get("wholeName") or
+                row.get("name") or
+                ""
+            ).strip()
             if not name:
                 continue
 
+            eu_ref = (row.get("euReferenceNumber") or row.get("referenceNumber") or "").strip()
             programme = (row.get("programme") or row.get("program") or "").strip()
             legal_basis = (row.get("regulation") or row.get("legalBasis") or "").strip()
-            eu_ref = (row.get("euReferenceNumber") or row.get("referenceNumber") or "").strip()
+            listing_date = (row.get("regulationEntryIntoForceDate") or "").strip()
+            remark = (row.get("remark") or "").strip()
 
             out.append({
                 "name": name,
@@ -177,62 +202,42 @@ class EUSanctionsClient:
                 "entity_type": "Entity",
                 "aliases": [],
                 "addresses": [],
-                "listing_date": (row.get("regulationEntryIntoForceDate") or "").strip(),
+                "listing_date": listing_date,
                 "programme": programme,
                 "legal_basis": legal_basis,
                 "identifiers": [],
-                "remark": (row.get("remark") or "").strip()
+                "remark": remark
             })
-        self._cache = (datetime.utcnow(), out)
         return out
 
-    def _parse_xml_entities(self, root: ET.Element) -> List[Dict[str, Any]]:
-        entities: List[Dict[str, Any]] = []
-        for subj in self._iter_subjects(root):
-            ent = self._parse_subject(subj)
-            if not ent:
-                continue
-            if ent.get("entity_type", "").lower() in {"entity", "vessel", "aircraft", "group", "undertaking"}:
-                if ent.get("name"):
-                    entities.append(ent)
-        return entities
-
-    # ----------------------- XML Helpers -----------------------
+    # ---------------- XML helpers ----------------
 
     @staticmethod
     def _localname(tag: str) -> str:
         return tag.split("}", 1)[-1] if "}" in tag else tag
 
-    def _iter_subjects(self, root: ET.Element):
-        for el in root.iter():
-            ln = self._localname(el.tag).lower()
-            if ln in {"sanctionentity", "sanctionperson", "subject", "entity"}:
-                yield el
-
     def _parse_subject(self, node: ET.Element) -> Optional[Dict[str, Any]]:
-        entity_type = self._first_text(node, {"subjecttype", "sdntype", "type"})
-        if not entity_type:
-            tag_ln = self._localname(node.tag).lower()
-            if "person" in tag_ln:
-                entity_type = "Individual"
-            elif "entity" in tag_ln or "undertaking" in tag_ln or "group" in tag_ln:
-                entity_type = "Entity"
-            else:
-                entity_type = "Entity"
+        # Explicitly an Entity container; default type = Entity
+        entity_type = "Entity"
 
-        eu_ref = self._first_text(node, {"eureferencenumber", "referencenumber", "eureferencenumber"})
+        # EU reference number (direct child or nested)
+        eu_ref = self._first_text(node, {"euReferenceNumber", "referenceNumber", "eureferencenumber"})
+
+        # Names & aliases (prefer strong=true)
         name, aliases = self._extract_names(node)
+
+        # Addresses, identifiers, programme, legal basis, listing date, remark
         addresses = self._extract_addresses(node)
         identifiers = self._extract_identifiers(node)
         programme = self._first_text(node, {"programme", "program"})
-        legal_basis = self._first_text(node, {"regulation", "legalbasis"})
-        listing_date = self._first_text(node, {"regulationentryintoforcedate", "entryintoforcedate", "listingdate"})
+        legal_basis = self._first_text(node, {"regulation", "legalBasis", "legalbasis"})
+        listing_date = self._first_text(node, {"regulationEntryIntoForceDate", "entryIntoForceDate", "listingDate"})
         remark = self._first_text(node, {"remark", "remarks"})
 
         if not name and not aliases:
             return None
-
         primary_name = name or (aliases[0] if aliases else "")
+
         return {
             "name": primary_name,
             "eu_reference_number": eu_ref,
@@ -246,59 +251,61 @@ class EUSanctionsClient:
             "remark": remark
         }
 
-    def _extract_names(self, node: ET.Element) -> Tuple[str, List[str]]:
-        primary = ""
-        aliases: List[str] = []
-        for child in node.iter():
-            if self._localname(child.tag).lower() == "namealias":
-                whole = self._first_text(child, {"wholename", "name"})
-                strong = self._first_text(child, {"strong"})
-                if whole:
-                    if (strong or "").strip().lower() == "true":
-                        primary = whole.strip()
-                    else:
-                        aliases.append(whole.strip())
-        if not primary:
-            direct = self._first_text(node, {"name", "wholename", "lastname"})
-            if direct:
-                primary = direct.strip()
-        return primary, aliases
-
-    def _extract_addresses(self, node: ET.Element) -> List[Dict[str, str]]:
-        addresses: List[Dict[str, str]] = []
-        for child in node.iter():
-            if self._localname(child.tag).lower() == "address":
-                address = {
-                    "street": self._first_text(child, {"street"}),
-                    "city": self._first_text(child, {"city", "town"}),
-                    "zip_code": self._first_text(child, {"zipcode", "zip", "postcode"}),
-                    "country": self._first_text(child, {"countrydescription", "country", "countrycode"}),
-                    "full_address": self._first_text(child, {"asatlistingtime", "fulladdress"})
-                }
-                if any(address.values()):
-                    addresses.append(address)
-        return addresses
-
-    def _extract_identifiers(self, node: ET.Element) -> List[Dict[str, str]]:
-        identifiers: List[Dict[str, str]] = []
-        for child in node.iter():
-            if self._localname(child.tag).lower() in {"identification", "id", "identifier"}:
-                id_type = self._first_text(child, {"identificationtypedescription", "identificationtypecode", "type"})
-                number = self._first_text(child, {"number", "value", "idnumber"})
-                if number:
-                    identifiers.append({"type": (id_type or "").strip(), "value": number.strip()})
-        return identifiers
-
     def _first_text(self, node: ET.Element, local_names: set) -> str:
         targets = {ln.lower() for ln in local_names}
+        # node itself
         if self._localname(node.tag).lower() in targets:
             return (node.text or "").strip()
+        # descendants
         for el in node.iter():
             if self._localname(el.tag).lower() in targets and el.text:
                 return el.text.strip()
         return ""
 
-    # ----------------------- Matching -----------------------
+    def _extract_names(self, node: ET.Element) -> Tuple[str, List[str]]:
+        """
+        EU sets name(s) in <nameAlias><wholeName>. Choose strong='true' as primary.
+        """
+        primary = ""
+        aliases: List[str] = []
+        for na in node.findall(".//{*}nameAlias"):
+            whole = self._first_text(na, {"wholeName", "wholename", "name"})
+            strong = self._first_text(na, {"strong"}).lower()
+            if whole:
+                if strong == "true":
+                    primary = whole.strip()
+                else:
+                    aliases.append(whole.strip())
+        if not primary:
+            direct = self._first_text(node, {"name", "wholeName", "wholename"})
+            if direct:
+                primary = direct.strip()
+        return primary, aliases
+
+    def _extract_addresses(self, node: ET.Element) -> List[Dict[str, str]]:
+        addrs: List[Dict[str, str]] = []
+        for a in node.findall(".//{*}address"):
+            addr = {
+                "street": self._first_text(a, {"street"}),
+                "city": self._first_text(a, {"city", "town"}),
+                "zip_code": self._first_text(a, {"zipCode", "zipcode", "zip", "postCode"}),
+                "country": self._first_text(a, {"countryDescription", "country", "countryCode"}),
+                "full_address": self._first_text(a, {"asAtListingTime", "fullAddress"})
+            }
+            if any(addr.values()):
+                addrs.append(addr)
+        return addrs
+
+    def _extract_identifiers(self, node: ET.Element) -> List[Dict[str, str]]:
+        ids: List[Dict[str, str]] = []
+        for ident in node.findall(".//{*}identification"):
+            id_type = self._first_text(ident, {"identificationTypeDescription", "identificationTypeCode", "type"})
+            number = self._first_text(ident, {"number", "value", "idNumber"})
+            if number:
+                ids.append({"type": (id_type or "").strip(), "value": number.strip()})
+        return ids
+
+    # ---------------- Matching ----------------
 
     def _clean_company_name(self, name: str) -> str:
         suffixes = {
@@ -336,11 +343,10 @@ class EUSanctionsClient:
         return bool(sw & ew)
 
 
-# ----------------------- Example usage -----------------------
+# ---------------- Example ----------------
 if __name__ == "__main__":
     client = EUSanctionsClient()
-    test_companies = ["Your Company Name", "Gazprom", "Apple Inc"]
-    for company in test_companies:
+    for company in ["Your Company Name", "Gazprom", "Apple Inc"]:
         print(f"\nSearching for: {company}")
         result = client.search_company(company)
         if result["status"] == "clear":
