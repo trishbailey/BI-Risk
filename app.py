@@ -9,7 +9,7 @@ AI_SUMMARY_ENABLED = bool(os.environ.get("OPENAI_API_KEY"))
 from app_components.sanctions_render import render_sanctions_result
 if AI_SUMMARY_ENABLED:
     from app_components.ai_explainer import explain_sanctions
-    from src.llm.openai_client import OpenAIClient  # NEW: For full report generation
+    from src.llm.openai_client import OpenAIClient  # For full report generation
 
 # -----------------------------------------------------------------------------
 # Page config
@@ -103,7 +103,7 @@ if st.session_state.step == 1:
 elif st.session_state.step == 2:
     st.header("Step 2: Sanctions Check")
     st.subheader(f"Checking: {st.session_state.company_name}")
-    st.info("This step checks OFAC, OpenSanctions, and EU sanctions databases.")
+    st.info("This step checks OFAC and OpenSanctions (covers global incl. EU/UN/UK).")
     # Lazy imports so the app loads even if a client is missing
     try:
         from src.api_clients.sanctions.ofac import OFACClient
@@ -116,12 +116,8 @@ elif st.session_state.step == 2:
         opensanctions_available = True
     except Exception:
         opensanctions_available = False
-    try:
-        from src.api_clients.sanctions.eu_sanctions import EUSanctionsClient
-        eu_available = True
-    except Exception:
-        eu_available = False
-    col1, col2, col3 = st.columns(3)
+    # REMOVED: EU Sanctions column and logic (redundant with OpenSanctions)
+    col1, col2 = st.columns(2)  # Now 2 columns instead of 3
     # --- OFAC ---
     with col1:
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
@@ -172,7 +168,7 @@ elif st.session_state.step == 2:
             with st.spinner("Checking OpenSanctions…"):
                 if opensanctions_available:
                     try:
-                        os_client = OpenSanctionsClient()
+                        os_client = OpenSanctionsClient(os.getenv("OPENSANCTIONS_API_KEY"))  # Pass key for paid
                         os_res = os_client.search_company(st.session_state.company_name)
                         db.save_api_response(
                             st.session_state.assessment_id,
@@ -212,50 +208,6 @@ elif st.session_state.step == 2:
                         st.session_state.assessment_id, "OpenSanctions", {"status": "clear", "matches": []}, 0.0
                     )
                     st.success("✅ OpenSanctions Check Complete — No matches found")
-    # --- EU ---
-    with col3:
-        if st.button("🔍 Check EU Sanctions", key="eu_check"):
-            with st.spinner("Checking EU Sanctions…"):
-                if eu_available:
-                    try:
-                        eu_client = EUSanctionsClient()
-                        eu_res = eu_client.search_company(st.session_state.company_name)
-                        db.save_api_response(
-                            st.session_state.assessment_id,
-                            "EU_Sanctions",
-                            eu_res,
-                            eu_res.get("api_cost", 0.0),
-                        )
-                        render_sanctions_result("EU Consolidated List", eu_res)
-                        if eu_res.get("status") == "found_matches":
-                            for m in eu_res.get("matches", []):
-                                sev = "critical" if (m.get("match_score") or 0) > 0.9 else "high"
-                                db.add_risk_finding(
-                                    st.session_state.assessment_id,
-                                    "Sanctions",
-                                    sev,
-                                    f"EU Sanctions match: {m.get('name')} (score: {m.get('match_score')})",
-                                    "EU_Sanctions",
-                                    m,
-                                )
-                        elif eu_res.get("status") == "clear":
-                            st.success("✅ EU Sanctions Check Complete — No matches found")
-                        else:
-                            st.error(f"Error checking EU Sanctions: {eu_res.get('error')}")
-                    except Exception as e:
-                        st.error(f"Error with EU Sanctions API: {str(e)}")
-                        db.save_api_response(
-                            st.session_state.assessment_id,
-                            "EU_Sanctions",
-                            {"status": "error", "error": str(e)},
-                            0.0,
-                        )
-                else:
-                    time.sleep(1)
-                    db.save_api_response(
-                        st.session_state.assessment_id, "EU_Sanctions", {"status": "clear", "matches": []}, 0.0
-                    )
-                    st.success("✅ EU Sanctions Check Complete — No matches found")
     # -------- Optional AI Summary (grounded, structured) --------
     st.markdown("---")
     if AI_SUMMARY_ENABLED:
@@ -263,12 +215,11 @@ elif st.session_state.step == 2:
             with st.spinner("Analyzing results…"):
                 # Pull the latest responses we just saved
                 api_responses = db.get_api_responses(st.session_state.assessment_id)
-                # Map by name for the explainer
+                # Map by name for the explainer (EU removed)
                 ofac_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OFAC_SDN"), {})
-                eu_res = next((r["response_data"] for r in api_responses if r["api_name"] == "EU_Sanctions"), {})
                 os_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OpenSanctions"), {})
                 try:
-                    ai = explain_sanctions(st.session_state.company_name, ofac_res, eu_res, os_res)
+                    ai = explain_sanctions(st.session_state.company_name, ofac_res, {}, os_res)  # Pass empty {} for EU
                     st.subheader("AI Summary")
                     st.write(ai["overall_assessment"])
                     st.write(f"**Risk:** {ai['risk_level']}")
@@ -395,7 +346,7 @@ elif st.session_state.step == 5:
     with col1:
         if st.button("📄 Generate Detailed Report", type="primary"):
             st.info("Generating AI-powered summary report...")
-            # NEW: Pull assessment details (industry from DB or session)
+            # Pull assessment details (industry from DB or session)
             assessment = db.get_assessment(st.session_state.assessment_id)  # Assume this method exists; add if needed
             industry = assessment.get("industry", "Unknown")
             if AI_SUMMARY_ENABLED:
