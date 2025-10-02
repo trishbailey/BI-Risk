@@ -118,7 +118,16 @@ elif st.session_state.step == 2:
         opensanctions_available = False
     # REMOVED: EU Sanctions column and logic (redundant with OpenSanctions)
     col1, col2 = st.columns(2)  # Now 2 columns instead of 3
-    # --- OFAC ---
+    # Persistent display for OFAC (shows after click, stays)
+    if st.session_state.get('ofac_result'):
+        with col1:
+            render_sanctions_result("OFAC (SDN)", st.session_state.ofac_result)
+            if st.session_state.ofac_result.get("status") == "clear":
+                st.success("✅ OFAC Check Complete — No matches found")
+            elif st.session_state.ofac_result.get("status") == "error":
+                st.error(f"Error: {st.session_state.ofac_result.get('error')}")
+    
+    # --- OFAC Button ---
     with col1:
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
             with st.spinner("Checking OFAC Sanctions…"):
@@ -126,15 +135,16 @@ elif st.session_state.step == 2:
                     try:
                         client = OFACClient()
                         ofac_res = client.search_company(st.session_state.company_name)
-                        # persist
+                        # Store in session_state for persistence
+                        st.session_state.ofac_result = ofac_res
+                        # persist to DB
                         db.save_api_response(
                             st.session_state.assessment_id,
                             "OFAC_SDN",
                             ofac_res,
                             ofac_res.get("api_cost", 0.0),
                         )
-                        # render
-                        render_sanctions_result("OFAC (SDN)", ofac_res)
+                        st.session_state.total_cost += ofac_res.get("api_cost", 0.0)
                         # risk findings
                         if ofac_res.get("status") == "found_matches":
                             for m in ofac_res.get("matches", []):
@@ -147,22 +157,33 @@ elif st.session_state.step == 2:
                                     "OFAC_SDN",
                                     m,
                                 )
-                        elif ofac_res.get("status") == "clear":
-                            st.success("✅ OFAC Check Complete — No matches found")
-                        else:
-                            st.error(f"Error checking OFAC: {ofac_res.get('error')}")
+                        st.rerun()  # Refresh to show persistent result
                     except Exception as e:
-                        st.error(f"Error with OFAC API: {str(e)}")
+                        st.session_state.ofac_result = {"status": "error", "error": str(e)}
                         db.save_api_response(
-                            st.session_state.assessment_id, "OFAC_SDN", {"status": "error", "error": str(e)}, 0.0
+                            st.session_state.assessment_id, "OFAC_SDN", st.session_state.ofac_result, 0.0
                         )
+                        st.error(f"Error with OFAC API: {str(e)}")
+                        st.rerun()
                 else:
+                    st.session_state.ofac_result = {"status": "clear", "matches": []}
                     time.sleep(1)
                     db.save_api_response(
-                        st.session_state.assessment_id, "OFAC_SDN", {"status": "clear", "matches": []}, 0.0
+                        st.session_state.assessment_id, "OFAC_SDN", st.session_state.ofac_result, 0.0
                     )
                     st.success("✅ OFAC Check Complete — No matches found")
-    # --- OpenSanctions ---
+                    st.rerun()
+    
+    # Persistent display for OpenSanctions (shows after click, stays)
+    if st.session_state.get('os_result'):
+        with col2:
+            render_sanctions_result("OpenSanctions", st.session_state.os_result)
+            if st.session_state.os_result.get("status") == "clear":
+                st.success("✅ OpenSanctions Check Complete — No matches found")
+            elif st.session_state.os_result.get("status") == "error":
+                st.error(f"Error: {st.session_state.os_result.get('error')}")
+    
+    # --- OpenSanctions Button ---
     with col2:
         if st.button("🔍 Check OpenSanctions", key="opensanctions_check"):
             with st.spinner("Checking OpenSanctions…"):
@@ -170,13 +191,17 @@ elif st.session_state.step == 2:
                     try:
                         os_client = OpenSanctionsClient(os.getenv("OPENSANCTIONS_API_KEY"))  # Pass key for paid
                         os_res = os_client.search_company(st.session_state.company_name)
+                        # Store in session_state for persistence
+                        st.session_state.os_result = os_res
+                        # persist to DB
                         db.save_api_response(
                             st.session_state.assessment_id,
                             "OpenSanctions",
                             os_res,
                             os_res.get("api_cost", 0.0),
                         )
-                        render_sanctions_result("OpenSanctions", os_res)
+                        st.session_state.total_cost += os_res.get("api_cost", 0.0)
+                        # risk findings
                         if os_res.get("status") == "found_matches":
                             for m in os_res.get("matches", []):
                                 sev = "critical" if (m.get("match_score") or 0) > 0.9 else "high"
@@ -190,30 +215,32 @@ elif st.session_state.step == 2:
                                     "OpenSanctions",
                                     m,
                                 )
-                        elif os_res.get("status") == "clear":
-                            st.success("✅ OpenSanctions Check Complete — No matches found")
-                        else:
-                            st.error(f"Error checking OpenSanctions: {os_res.get('error')}")
+                        st.rerun()  # Refresh to show persistent result
                     except Exception as e:
-                        st.error(f"Error with OpenSanctions API: {str(e)}")
+                        st.session_state.os_result = {"status": "error", "error": str(e)}
                         db.save_api_response(
                             st.session_state.assessment_id,
                             "OpenSanctions",
-                            {"status": "error", "error": str(e)},
+                            st.session_state.os_result,
                             0.0,
                         )
+                        st.error(f"Error with OpenSanctions API: {str(e)}")
+                        st.rerun()
                 else:
+                    st.session_state.os_result = {"status": "clear", "matches": []}
                     time.sleep(1)
                     db.save_api_response(
-                        st.session_state.assessment_id, "OpenSanctions", {"status": "clear", "matches": []}, 0.0
+                        st.session_state.assessment_id, "OpenSanctions", st.session_state.os_result, 0.0
                     )
                     st.success("✅ OpenSanctions Check Complete — No matches found")
-    # -------- Optional AI Summary (grounded, structured) --------
+                    st.rerun()
+    
+    # -------- Optional AI Summary (draws from both DB entries) --------
     st.markdown("---")
     if AI_SUMMARY_ENABLED:
         if st.button("🧠 Summarize Sanctions Findings with OpenAI"):
             with st.spinner("Analyzing results…"):
-                # Pull the latest responses we just saved
+                # Pull the latest responses we just saved (from both APIs)
                 api_responses = db.get_api_responses(st.session_state.assessment_id)
                 # Map by name for the explainer (EU removed)
                 ofac_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OFAC_SDN"), {})
