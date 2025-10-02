@@ -1,25 +1,33 @@
 # src/api_clients/sanctions/ofac.py
 import requests
+import csv
+import io
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any
 from datetime import datetime
-import time
+from xml.etree import ElementTree as ET
 
 class OFACClient:
     """
     Client for searching OFAC's Specially Designated Nationals (SDN) list.
+    Uses OFAC's Sanctions List Service (SLS) endpoints.
     This is FREE and requires no API key.
     """
     
     def __init__(self):
-        # OFAC's new Sanctions List Service (SLS) endpoints
+        # OFAC's Sanctions List Service (SLS) base URL
         self.sls_base = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports"
-        # Direct download URLs for the SDN list
-        self.sdn_json_url = f"{self.sls_base}/SDN_ADVANCED.JSON"
-        self.sdn_xml_url = f"{self.sls_base}/SDN_ADVANCED.XML"
-        # CSV format is often easier to parse
+        # Supported, stable formats
         self.sdn_csv_url = f"{self.sls_base}/SDN.CSV"
+        self.sdn_xml_url = f"{self.sls_base}/SDN.XML"
+        self.sdn_adv_xml_url = f"{self.sls_base}/SDN_ADVANCED.XML"
         
+        # Required headers - OFAC requires User-Agent
+        self.headers = {
+            "Accept": "*/*",
+            "User-Agent": "M&A-Risk-Assessment/1.0"
+        }
+    
     def search_company(self, company_name: str, threshold: float = 0.7) -> Dict[str, Any]:
         """
         Search for a company in the OFAC SDN list.
@@ -35,26 +43,8 @@ class OFACClient:
             # Clean the company name
             cleaned_name = self._clean_company_name(company_name)
             
-            # For now, go straight to downloading the list since the API seems unreliable
-            results = self._search_downloaded_list(cleaned_name)
-            
-            # Process results
-            matches = []
-            for result in results:
-                score = self._calculate_match_score(cleaned_name, result.get('name', ''))
-                if score >= threshold:
-                    matches.append({
-                        'name': result.get('name'),
-                        'match_score': round(score, 2),
-                        'type': result.get('type', 'Unknown'),
-                        'programs': result.get('programs', []),
-                        'addresses': result.get('addressList', []),
-                        'aliases': result.get('akaList', []),
-                        'ids': result.get('idList', []),
-                        'source': 'OFAC SDN',
-                        'list_date': result.get('publishDate'),
-                        'remarks': result.get('remarks', '')
-                    })
+            # Download and search the SDN list
+            matches = self._search_downloaded_list(cleaned_name, threshold)
             
             return {
                 'searched_name': company_name,
@@ -76,121 +66,132 @@ class OFACClient:
                 'api_cost': 0.0
             }
     
-    def _search_sdn_api(self, name: str) -> List[Dict]:
+    def _search_downloaded_list(self, search_name: str, threshold: float) -> List[Dict]:
         """
-        Search using OFAC's public search API
+        Download and search the OFAC SDN list
         """
-        # OFAC's search endpoint
-        search_url = f"{self.api_base}/search"
-        
-        # Parameters for the search
-        params = {
-            'name': name,
-            'type': 'Entity',  # Focus on entities (companies) not individuals
-            'minScore': 80,    # OFAC's internal minimum score
-            'limit': 50
-        }
-        
-        headers = {
-            'Accept': 'application/json',
-            'User-Agent': 'M&A-Risk-Assessment-Tool'
-        }
-        
+        # Try CSV first (simpler and complete)
         try:
-            response = requests.get(
-                search_url, 
-                params=params, 
-                headers=headers,
-                timeout=30
-            )
+            response = requests.get(self.sdn_csv_url, headers=self.headers, timeout=60)
+            response.raise_for_status()
             
-            if response.status_code == 200:
-                data = response.json()
-                return data.get('results', [])
-            else:
-                # Always use the fallback for now
-                print(f"OFAC API returned status {response.status_code}, using fallback")
-                return self._search_downloaded_list(name)
+            matches = []
+            
+            # Parse CSV properly using csv module
+            csv_buffer = io.StringIO(response.text)
+            reader = csv.DictReader(csv_buffer)
+            
+            for row in reader:
+                # OFAC CSV headers: ent_num, sdnName, sdnType, programList, title, callSign, 
+                # vesselType, tonnage, grossRegisteredTonnage, vesselFlag, vesselOwner, remarks
                 
-        except requests.exceptions.RequestException as e:
-            # Fallback to downloaded list
-            print(f"OFAC API error: {str(e)}, using fallback")
-            return self._search_downloaded_list(name)
+                sdn_type = (row.get('sdnType') or '').strip()
+                sdn_name = (row.get('sdnName') or '').strip()
+                
+                # Only look at entities and vessels, not individuals
+                if sdn_type in ['Entity', 'Vessel']:
+                    # Calculate match score
+                    score = self._calculate_match_score(search_name, sdn_name)
+                    
+                    if score >= threshold:
+                        matches.append({
+                            'name': sdn_name,
+                            'match_score': round(score, 2),
+                            'type': sdn_type,
+                            'programs': [p.strip() for p in (row.get('programList') or '').split(';') if p.strip()],
+                            'remarks': row.get('remarks', '').strip(),
+                            'source': 'OFAC SDN',
+                            'sdn_number': row.get('ent_num', '').strip(),
+                            'vessel_details': {
+                                'call_sign': row.get('callSign', '').strip(),
+                                'vessel_type': row.get('vesselType', '').strip(),
+                                'flag': row.get('vesselFlag', '').strip()
+                            } if sdn_type == 'Vessel' else None
+                        })
+            
+            return matches
+            
+        except Exception as csv_error:
+            print(f"CSV download failed: {csv_error}, trying XML...")
+            
+            # Fallback to XML
+            try:
+                response = requests.get(self.sdn_xml_url, headers=self.headers, timeout=60)
+                response.raise_for_status()
+                
+                return self._parse_xml_response(response.content, search_name, threshold)
+                
+            except Exception as xml_error:
+                print(f"XML download also failed: {xml_error}")
+                return []
     
-    def _search_downloaded_list(self, name: str) -> List[Dict]:
+    def _parse_xml_response(self, xml_content: bytes, search_name: str, threshold: float) -> List[Dict]:
         """
-        Download and search the OFAC SDN list directly
+        Parse SDN XML format
         """
+        matches = []
+        
         try:
-            # Try JSON format first
-            response = requests.get(self.sdn_json_url, timeout=60)
+            root = ET.fromstring(xml_content)
             
-            if response.status_code == 200:
-                data = response.json()
-                results = []
+            # Determine namespace from root
+            ns = {'x': root.tag.split('}')[0].strip('{')} if '}' in root.tag else {}
+            
+            # Find all SDN entries
+            for entry in root.findall('.//sdnEntry', ns) or root.findall('.//x:sdnEntry', ns):
+                # Get SDN type
+                sdn_type_elem = entry.find('sdnType', ns) or entry.find('x:sdnType', ns)
+                sdn_type = sdn_type_elem.text.strip() if sdn_type_elem is not None else ''
                 
-                # The structure might be different, let's check what we get
-                if isinstance(data, dict):
-                    # Look for the entries/records
-                    entries = data.get('entries', data.get('records', data.get('data', [])))
-                elif isinstance(data, list):
-                    entries = data
-                else:
-                    entries = []
-                
-                # Search through entries
-                for entry in entries:
-                    # Skip individuals, focus on entities
-                    if entry.get('type') in ['Entity', 'Vessel'] or entry.get('sdnType') == 'Entity':
-                        entry_name = entry.get('name', entry.get('lastName', ''))
-                        if self._is_potential_match(name, entry_name):
-                            results.append(entry)
-                
-                return results
-                
+                if sdn_type in ['Entity', 'Vessel']:
+                    # Get name - could be in different places
+                    name_elem = (entry.find('.//lastName', ns) or 
+                               entry.find('.//x:lastName', ns) or
+                               entry.find('lastName') or
+                               entry.find('x:lastName'))
+                    
+                    sdn_name = name_elem.text.strip() if name_elem is not None else ''
+                    
+                    if sdn_name:
+                        score = self._calculate_match_score(search_name, sdn_name)
+                        
+                        if score >= threshold:
+                            # Get programs
+                            programs = []
+                            for prog in entry.findall('.//program', ns) or entry.findall('.//x:program', ns):
+                                if prog.text:
+                                    programs.append(prog.text.strip())
+                            
+                            # Get remarks
+                            remarks_elem = entry.find('remarks', ns) or entry.find('x:remarks', ns)
+                            remarks = remarks_elem.text.strip() if remarks_elem is not None else ''
+                            
+                            matches.append({
+                                'name': sdn_name,
+                                'match_score': round(score, 2),
+                                'type': sdn_type,
+                                'programs': programs,
+                                'remarks': remarks,
+                                'source': 'OFAC SDN'
+                            })
+            
         except Exception as e:
-            print(f"Error downloading SDN list: {str(e)}")
+            print(f"XML parsing error: {e}")
             
-        # If JSON fails, try CSV format
-        try:
-            response = requests.get(self.sdn_csv_url, timeout=60)
-            if response.status_code == 200:
-                # Parse CSV manually
-                lines = response.text.strip().split('\n')
-                results = []
-                
-                for line in lines[1:]:  # Skip header
-                    fields = line.split('","')
-                    if len(fields) > 2:
-                        # Check if entity (not individual)
-                        sdn_type = fields[2].strip('"') if len(fields) > 2 else ''
-                        if sdn_type == 'Entity':
-                            name_field = fields[1].strip('"') if len(fields) > 1 else ''
-                            if self._is_potential_match(name, name_field):
-                                results.append({
-                                    'name': name_field,
-                                    'type': sdn_type,
-                                    'programs': [fields[11].strip('"')] if len(fields) > 11 else []
-                                })
-                
-                return results
-                
-        except Exception as e:
-            print(f"Error downloading CSV: {str(e)}")
-            
-        return []
+        return matches
     
     def _clean_company_name(self, name: str) -> str:
         """
         Clean and normalize company name for searching
         """
-        # Convert to uppercase (OFAC format)
+        # Convert to uppercase (OFAC format is uppercase)
         name = name.upper()
         
-        # Remove common suffixes that might not match exactly
+        # Remove common suffixes
         suffixes = [
             ' INC', ' LLC', ' LTD', ' LIMITED', ' CORP', ' CORPORATION',
-            ' COMPANY', ' CO', ' PLC', ' SA', ' AG', ' GMBH', ' BV'
+            ' COMPANY', ' CO', ' PLC', ' SA', ' AG', ' GMBH', ' BV',
+            ' OOO', ' OAO', ' PAO', ' ZAO', ' JSC', ' PJSC', ' OJSC'  # Russian entities
         ]
         
         for suffix in suffixes:
@@ -209,7 +210,6 @@ class OFACClient:
         """
         Calculate similarity score between two company names
         """
-        # Simple approach - can be enhanced with fuzzy matching
         search_clean = self._clean_company_name(search_name)
         found_clean = self._clean_company_name(found_name)
         
@@ -217,7 +217,7 @@ class OFACClient:
         if search_clean == found_clean:
             return 1.0
         
-        # Check if one contains the other
+        # One contains the other
         if search_clean in found_clean or found_clean in search_clean:
             return 0.9
         
@@ -228,60 +228,8 @@ class OFACClient:
         if not search_words or not found_words:
             return 0.0
         
+        # Calculate Jaccard similarity
         overlap = len(search_words & found_words)
         total = len(search_words | found_words)
         
         return overlap / total if total > 0 else 0.0
-    
-    def _is_potential_match(self, search_name: str, entry_name: str) -> bool:
-        """
-        Quick check if names might match (for filtering large lists)
-        """
-        search_clean = self._clean_company_name(search_name)
-        entry_clean = self._clean_company_name(entry_name)
-        
-        # Check if any significant word matches
-        search_words = {w for w in search_clean.split() if len(w) > 3}
-        entry_words = {w for w in entry_clean.split() if len(w) > 3}
-        
-        return bool(search_words & entry_words)
-    
-    def check_multiple_companies(self, company_names: List[str]) -> List[Dict[str, Any]]:
-        """
-        Check multiple companies (batch processing)
-        """
-        results = []
-        
-        for company in company_names:
-            # Add small delay to be respectful to free service
-            time.sleep(0.5)
-            result = self.search_company(company)
-            results.append(result)
-        
-        return results
-
-
-# Example usage and testing
-if __name__ == "__main__":
-    # Test the OFAC client
-    client = OFACClient()
-    
-    # Test with a known sanctioned entity (for testing)
-    test_companies = [
-        "Your Company Name",  # Replace with actual company
-        "Rosneft",  # Known sanctioned entity for testing
-        "Apple Inc"  # Clean company for testing
-    ]
-    
-    for company in test_companies:
-        print(f"\nSearching for: {company}")
-        result = client.search_company(company)
-        
-        if result['status'] == 'clear':
-            print(f"✅ {company} - CLEAR (no OFAC matches)")
-        elif result['status'] == 'found_matches':
-            print(f"⚠️  {company} - FOUND {result['match_count']} potential matches:")
-            for match in result['matches']:
-                print(f"   - {match['name']} (score: {match['match_score']})")
-        else:
-            print(f"❌ {company} - ERROR: {result.get('error')}")
