@@ -12,12 +12,15 @@ class OFACClient:
     """
     
     def __init__(self):
-        # OFAC provides multiple formats - we'll use the JSON format
-        self.sdn_url = "https://www.treasury.gov/ofac/downloads/sdn_advanced.xml"
-        # Alternative: Use their API endpoint (better for our use case)
-        self.api_base = "https://sanctionslistservice.ofac.treas.gov/api/PublicSearchAPI"
+        # OFAC's new Sanctions List Service (SLS) endpoints
+        self.sls_base = "https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports"
+        # Direct download URLs for the SDN list
+        self.sdn_json_url = f"{self.sls_base}/SDN_ADVANCED.JSON"
+        self.sdn_xml_url = f"{self.sls_base}/SDN_ADVANCED.XML"
+        # CSV format is often easier to parse
+        self.sdn_csv_url = f"{self.sls_base}/SDN.CSV"
         
-    def search_company(self, company_name: str, threshold: float = 0.8) -> Dict[str, Any]:
+    def search_company(self, company_name: str, threshold: float = 0.7) -> Dict[str, Any]:
         """
         Search for a company in the OFAC SDN list.
         
@@ -32,8 +35,8 @@ class OFACClient:
             # Clean the company name
             cleaned_name = self._clean_company_name(company_name)
             
-            # Search using the OFAC API
-            results = self._search_sdn_api(cleaned_name)
+            # For now, go straight to downloading the list since the API seems unreliable
+            results = self._search_downloaded_list(cleaned_name)
             
             # Process results
             matches = []
@@ -105,38 +108,76 @@ class OFACClient:
                 data = response.json()
                 return data.get('results', [])
             else:
-                # Fallback to downloading the full list if API fails
+                # Always use the fallback for now
+                print(f"OFAC API returned status {response.status_code}, using fallback")
                 return self._search_downloaded_list(name)
                 
-        except requests.exceptions.RequestException:
+        except requests.exceptions.RequestException as e:
             # Fallback to downloaded list
+            print(f"OFAC API error: {str(e)}, using fallback")
             return self._search_downloaded_list(name)
     
     def _search_downloaded_list(self, name: str) -> List[Dict]:
         """
-        Fallback: Download and search the consolidated SDN list
+        Download and search the OFAC SDN list directly
         """
-        # Use the JSON format which is easier to parse
-        json_url = "https://www.treasury.gov/ofac/downloads/sanctions/1.0/sdn_advanced.json"
-        
         try:
-            response = requests.get(json_url, timeout=60)
+            # Try JSON format first
+            response = requests.get(self.sdn_json_url, timeout=60)
+            
             if response.status_code == 200:
                 data = response.json()
-                
                 results = []
-                # Search through the entries
-                for entry in data.get('entries', []):
-                    if entry.get('type') in ['Entity', 'Vessel']:  # Companies and vessels
-                        entry_name = entry.get('name', '')
+                
+                # The structure might be different, let's check what we get
+                if isinstance(data, dict):
+                    # Look for the entries/records
+                    entries = data.get('entries', data.get('records', data.get('data', [])))
+                elif isinstance(data, list):
+                    entries = data
+                else:
+                    entries = []
+                
+                # Search through entries
+                for entry in entries:
+                    # Skip individuals, focus on entities
+                    if entry.get('type') in ['Entity', 'Vessel'] or entry.get('sdnType') == 'Entity':
+                        entry_name = entry.get('name', entry.get('lastName', ''))
                         if self._is_potential_match(name, entry_name):
                             results.append(entry)
                 
                 return results
+                
+        except Exception as e:
+            print(f"Error downloading SDN list: {str(e)}")
             
-        except Exception:
-            return []
-        
+        # If JSON fails, try CSV format
+        try:
+            response = requests.get(self.sdn_csv_url, timeout=60)
+            if response.status_code == 200:
+                # Parse CSV manually
+                lines = response.text.strip().split('\n')
+                results = []
+                
+                for line in lines[1:]:  # Skip header
+                    fields = line.split('","')
+                    if len(fields) > 2:
+                        # Check if entity (not individual)
+                        sdn_type = fields[2].strip('"') if len(fields) > 2 else ''
+                        if sdn_type == 'Entity':
+                            name_field = fields[1].strip('"') if len(fields) > 1 else ''
+                            if self._is_potential_match(name, name_field):
+                                results.append({
+                                    'name': name_field,
+                                    'type': sdn_type,
+                                    'programs': [fields[11].strip('"')] if len(fields) > 11 else []
+                                })
+                
+                return results
+                
+        except Exception as e:
+            print(f"Error downloading CSV: {str(e)}")
+            
         return []
     
     def _clean_company_name(self, name: str) -> str:
