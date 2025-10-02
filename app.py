@@ -257,16 +257,76 @@ elif st.session_state.step == 2:
     with col3:
         if st.button("🔍 Check EU Sanctions", key="eu_check"):
             with st.spinner("Checking EU Sanctions..."):
-                time.sleep(2)
+                # Import EU Sanctions client
+                try:
+                    from src.api_clients.sanctions.eu_sanctions import EUSanctionsClient
+                    eu_available = True
+                except ImportError:
+                    eu_available = False
                 
-                db.save_api_response(
-                    st.session_state.assessment_id,
-                    "EU_Sanctions",
-                    {"status": "clear", "matches": []},
-                    0.0
-                )
-                
-                st.success("✅ EU Sanctions Check Complete - No matches found")
+                if eu_available:
+                    try:
+                        eu_client = EUSanctionsClient()
+                        result = eu_client.search_company(st.session_state.company_name)
+                        
+                        # Save the response
+                        db.save_api_response(
+                            st.session_state.assessment_id,
+                            "EU_Sanctions",
+                            result,
+                            result.get('api_cost', 0.0)
+                        )
+                        
+                        # Display results
+                        if result['status'] == 'clear':
+                            st.success(f"✅ EU Sanctions Check Complete - No matches found")
+                        elif result['status'] == 'found_matches':
+                            st.warning(f"⚠️ EU Sanctions Check - Found {result['match_count']} potential matches")
+                            
+                            # Add risk findings
+                            for match in result['matches']:
+                                severity = 'critical' if match['match_score'] > 0.9 else 'high'
+                                
+                                db.add_risk_finding(
+                                    st.session_state.assessment_id,
+                                    "Sanctions",
+                                    severity,
+                                    f"EU Sanctions match: {match['name']} (score: {match['match_score']}) - Programme: {match.get('programme', 'N/A')}",
+                                    "EU_Sanctions",
+                                    match
+                                )
+                            
+                            # Show details in expander
+                            with st.expander("View EU Sanctions Match Details"):
+                                for match in result['matches']:
+                                    st.write(f"**{match['name']}**")
+                                    st.write(f"- Match Score: {match['match_score']}")
+                                    st.write(f"- EU Reference: {match.get('eu_reference', 'N/A')}")
+                                    st.write(f"- Programme: {match.get('programme', 'N/A')}")
+                                    st.write(f"- Listed Date: {match.get('listing_date', 'N/A')}")
+                                    if match.get('aliases'):
+                                        st.write(f"- Also known as: {', '.join(match['aliases'][:3])}")
+                        else:
+                            st.error(f"Error checking EU Sanctions: {result.get('error')}")
+                            
+                    except Exception as e:
+                        st.error(f"Error with EU Sanctions API: {str(e)}")
+                        db.save_api_response(
+                            st.session_state.assessment_id,
+                            "EU_Sanctions",
+                            {"status": "error", "error": str(e)},
+                            0.0
+                        )
+                else:
+                    # Use mock data if client not available
+                    time.sleep(2)
+                    db.save_api_response(
+                        st.session_state.assessment_id,
+                        "EU_Sanctions",
+                        {"status": "clear", "matches": []},
+                        0.0
+                    )
+                    st.success("✅ EU Sanctions Check Complete - No matches found")
     
     st.markdown("---")
     
