@@ -42,7 +42,7 @@ class OFACClient:
                 total=3,
                 backoff_factor=0.5,
                 status_forcelist=(429, 500, 502, 503, 504),
-                allowed_methods=frozenset(["GET"])
+                allowed_methods=frozenset(["GET"]),
             )
             self.session.mount("https://", HTTPAdapter(max_retries=retry))
 
@@ -243,12 +243,11 @@ class OFACClient:
         aliases: List[str] = []
         for el in node.iter():
             if self._local(el.tag).lower() in {"aka", "akaentity"}:
-                aka_name = self._first_text(el, {"lastname", "firstname", "name", "akaName"})
-                # Prefer whole name if provided
+                aka_name = self._first_text(el, {"lastname", "firstname", "name", "akaname"})
                 whole = self._first_text(el, {"wholename"})
-                alias = whole or aka_name
+                alias = (whole or aka_name or "").strip()
                 if alias:
-                    aliases.append(alias.strip())
+                    aliases.append(alias)
 
         # Addresses (addressList)
         addresses: List[Dict[str, str]] = []
@@ -260,7 +259,7 @@ class OFACClient:
                     "city": self._first_text(el, {"city"}),
                     "state": self._first_text(el, {"state"}),
                     "postal_code": self._first_text(el, {"postalcode", "zip"}),
-                    "country": self._first_text(el, {"country"})
+                    "country": self._first_text(el, {"country"}),
                 }
                 if any(v for v in addr.values()):
                     addresses.append(addr)
@@ -280,4 +279,99 @@ class OFACClient:
             "programs": programs,
             "remarks": remarks,
             "publishDate": publish_date,
-            "s
+            "sdn_number": sdn_number,
+            "aliases": aliases,
+            "addresses": addresses,
+            "ids": ids_list,
+        }
+
+        if sdn_type == "Vessel":
+            vessel = {
+                "call_sign": self._first_text(node, {"callsign"}),
+                "vessel_type": self._first_text(node, {"vesseltype"}),
+                "flag": self._first_text(node, {"vesselflag"}),
+            }
+            if any(v for v in vessel.values()):
+                rec["vessel_details"] = vessel
+
+        return rec if rec.get("name") else None
+
+    def _first_text(self, node: ET.Element, local_names: set) -> str:
+        """
+        First text for any descendant whose local tag name is in `local_names`.
+        """
+        targets = {ln.lower() for ln in local_names}
+        # Check node itself
+        if self._local(node.tag).lower() in targets:
+            return (node.text or "").strip()
+        # Walk descendants
+        for el in node.iter():
+            if self._local(el.tag).lower() in targets and el.text:
+                return el.text.strip()
+        return ""
+
+    def _all_texts(self, node: ET.Element, local_names: set) -> List[str]:
+        """
+        All texts for descendants with local tag names in `local_names`.
+        """
+        targets = {ln.lower() for ln in local_names}
+        vals: List[str] = []
+        for el in node.iter():
+            if self._local(el.tag).lower() in targets and el.text:
+                vals.append(el.text.strip())
+        return vals
+
+    # ---------------- Matching ----------------
+
+    def _clean_company_name(self, name: str) -> str:
+        """
+        Normalize names to improve fuzzy matching (OFAC is uppercase).
+        """
+        s = name.upper().strip()
+        s = re.sub(r"[^\w\s]", " ", s)
+
+        suffixes = {
+            " INC", " LLC", " LTD", " LIMITED", " CORP", " CORPORATION",
+            " COMPANY", " CO", " PLC", " SA", " AG", " GMBH", " BV",
+            " OOO", " OAO", " PAO", " ZAO", " JSC", " PJSC", " OJSC",
+        }
+        for suf in sorted(suffixes, key=len, reverse=True):
+            if s.endswith(suf):
+                s = s[: -len(suf)].strip()
+
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    def _calculate_match_score(self, search_name: str, found_name: str) -> float:
+        """
+        Jaccard word overlap with bonuses for exact/containment.
+        """
+        s = self._clean_company_name(search_name)
+        f = self._clean_company_name(found_name)
+        if not s or not f:
+            return 0.0
+        if s == f:
+            return 1.0
+        if s in f or f in s:
+            return 0.9
+        sw, fw = set(s.split()), set(f.split())
+        if not sw or not fw:
+            return 0.0
+        return len(sw & fw) / len(sw | fw)
+
+
+# ---------------- Example usage ----------------
+if __name__ == "__main__":
+    client = OFACClient()
+    demo = ["Your Company Name", "Rosneft", "Apple Inc"]
+    for company in demo:
+        print(f"\nSearching for: {company}")
+        result = client.search_company(company)
+        if result["status"] == "clear":
+            print(f"✅ {company} - CLEAR (no OFAC matches)")
+        elif result["status"] == "found_matches":
+            print(f"⚠️  {company} - FOUND {result['match_count']} potential matches:")
+            for m in result["matches"]:
+                print(f"   - {m['name']} (score: {m['match_score']}) | {m['type']} | Programs: {', '.join(m.get('programs', []))}")
+        else:
+            print(f"❌ {company} - ERROR: {result.get('error')}")
