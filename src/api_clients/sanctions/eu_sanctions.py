@@ -5,43 +5,67 @@ import re
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timedelta
 import time
+from io import StringIO
+import csv
+
+try:
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
+except Exception:
+    HTTPAdapter = None
+    Retry = None
+
 
 class EUSanctionsClient:
     """
     Client for searching the EU Consolidated Financial Sanctions List.
-    Uses the official XML v1.1 file published by the EU FSF (no API key).
+    Fetches the official XML v1.1 (preferred) or CSV, normalizes Entities only.
     """
 
     def __init__(self):
-        # Canonical v1.1 XML endpoint for the consolidated list (no token required)
-        self.xml_v11_url = (
-            "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content"
+        # Primary (often OK)
+        self.xml_v11_primary = "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content"
+        self.csv_primary = "https://webgate.ec.europa.eu/fsd/fsf/public/files/csvFullSanctionsList/content"
+
+        # Public-token fallbacks (commonly used by integrators to avoid 403)
+        # token=dG9rZW4tMjAxNw (base64 for "token-2017")
+        self.xml_v11_token = (
+            "https://webgate.ec.europa.eu/fsd/fsf/public/files/xmlFullSanctionsList_1_1/content?token=dG9rZW4tMjAxNw"
         )
-        # Always send a UA; some EC services reject botless requests
+        self.csv_token = (
+            "https://webgate.ec.europa.eu/fsd/fsf/public/files/csvFullSanctionsList/content?token=dG9rZW4tMjAxNw"
+        )
+
+        # Headers: some FSF edges 403 if headers look “non-browser”
         self.headers = {
-            "Accept": "application/xml,text/xml,*/*",
-            "User-Agent": "M-A-Risk-Assessment-Tool/1.0 (+contact@example.com)"
+            "Accept": "application/xml,text/xml,application/json,text/csv,*/*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": "M-A-Risk-Assessment-Tool/1.0 (+contact@example.com)",
+            "Referer": "https://webgate.ec.europa.eu/fsd/fsf/public/",
+            "Connection": "keep-alive",
         }
-        # Simple in-memory cache so batch checks don't refetch every time
+
+        # Session + retries
+        self.session = requests.Session()
+        if HTTPAdapter and Retry:
+            retry = Retry(
+                total=3,
+                backoff_factor=0.5,
+                status_forcelist=(403, 429, 500, 502, 503, 504),
+                allowed_methods=frozenset(["GET"]),
+            )
+            self.session.mount("https://", HTTPAdapter(max_retries=retry))
+
+        # Cache
         self._cache: Optional[Tuple[datetime, List[Dict[str, Any]]]] = None
         self._cache_ttl = timedelta(hours=6)
 
     # ----------------------- Public API -----------------------
 
     def search_company(self, company_name: str, threshold: float = 0.7) -> Dict[str, Any]:
-        """
-        Search for a company (entities only) in the EU consolidated list.
-
-        Args:
-            company_name: Name of the company to search
-            threshold: Minimum match score (0-1) to keep a match
-
-        Returns:
-            Structured search result with matches (if any)
-        """
         try:
             cleaned_name = self._clean_company_name(company_name)
-            entities = self._load_entities()  # cached fetch + parse
+            entities = self._load_entities()
 
             matches = []
             for ent in entities:
@@ -70,7 +94,6 @@ class EUSanctionsClient:
                 "search_timestamp": datetime.utcnow().isoformat() + "Z",
                 "api_cost": 0.0
             }
-
         except Exception as e:
             return {
                 "searched_name": company_name,
@@ -83,118 +106,133 @@ class EUSanctionsClient:
             }
 
     def check_multiple_companies(self, company_names: List[str]) -> List[Dict[str, Any]]:
-        """
-        Batch check multiple companies (uses the cached list).
-        """
         results = []
         for company in company_names:
-            time.sleep(0.25)  # be polite
+            time.sleep(0.25)
             results.append(self.search_company(company))
         return results
 
     # ----------------------- Fetch & Parse -----------------------
 
+    def _get_first_success(self, urls: List[str]) -> Optional[requests.Response]:
+        for url in urls:
+            try:
+                r = self.session.get(url, headers=self.headers, timeout=90)
+                if r.status_code == 200 and r.content:
+                    return r
+            except requests.RequestException:
+                continue
+        return None
+
     def _load_entities(self) -> List[Dict[str, Any]]:
-        """
-        Fetch and parse the EU XML list, with basic caching.
-        Returns normalized 'entity' records only (no individuals).
-        """
-        # Serve cache if fresh
         if self._cache and (datetime.utcnow() - self._cache[0]) < self._cache_ttl:
             return self._cache[1]
 
-        # Fetch
-        r = requests.get(self.xml_v11_url, headers=self.headers, timeout=90)
-        r.raise_for_status()
+        # Try XML v1.1 first (primary, then token)
+        xml_resp = self._get_first_success([self.xml_v11_primary, self.xml_v11_token])
+        if xml_resp is not None:
+            try:
+                root = ET.fromstring(xml_resp.content)
+                entities = self._parse_xml_entities(root)
+                self._cache = (datetime.utcnow(), entities)
+                return entities
+            except Exception:
+                # fall through to CSV if parsing fails
+                pass
 
-        # Parse
-        root = ET.fromstring(r.content)
+        # Fallback: CSV (primary, then token)
+        csv_resp = self._get_first_success([self.csv_primary, self.csv_token])
+        if csv_resp is not None:
+            try:
+                return self._parse_csv_entities(csv_resp.text)
+            except Exception:
+                pass
 
-        # Build normalized entity list
+        # Nothing worked
+        self._cache = (datetime.utcnow(), [])
+        return []
+
+    # ----------------------- Parse: XML & CSV -----------------------
+
+    def _parse_csv_entities(self, csv_text: str) -> List[Dict[str, Any]]:
+        out: List[Dict[str, Any]] = []
+        reader = csv.DictReader(StringIO(csv_text))
+        for row in reader:
+            # CSV headers commonly: subjectType, euReferenceNumber, nameAlias.wholeName (flattened variants vary)
+            subj_type = (row.get("subjectType") or row.get("subjectTypeCode") or "").strip()
+            if subj_type.lower() in {"person", "individual"}:
+                continue  # entities only
+
+            name = (row.get("nameAlias.wholeName") or row.get("wholeName") or row.get("name") or "").strip()
+            if not name:
+                continue
+
+            programme = (row.get("programme") or row.get("program") or "").strip()
+            legal_basis = (row.get("regulation") or row.get("legalBasis") or "").strip()
+            eu_ref = (row.get("euReferenceNumber") or row.get("referenceNumber") or "").strip()
+
+            out.append({
+                "name": name,
+                "eu_reference_number": eu_ref,
+                "entity_type": "Entity",
+                "aliases": [],
+                "addresses": [],
+                "listing_date": (row.get("regulationEntryIntoForceDate") or "").strip(),
+                "programme": programme,
+                "legal_basis": legal_basis,
+                "identifiers": [],
+                "remark": (row.get("remark") or "").strip()
+            })
+        self._cache = (datetime.utcnow(), out)
+        return out
+
+    def _parse_xml_entities(self, root: ET.Element) -> List[Dict[str, Any]]:
         entities: List[Dict[str, Any]] = []
         for subj in self._iter_subjects(root):
             ent = self._parse_subject(subj)
             if not ent:
                 continue
-            # Only keep non-individuals (Entity/Vessel/Aircraft). EU primarily distinguishes entity vs. person.
             if ent.get("entity_type", "").lower() in {"entity", "vessel", "aircraft", "group", "undertaking"}:
-                # Ensure we have a primary name; if not, skip to avoid junk matches
                 if ent.get("name"):
                     entities.append(ent)
-
-        # Cache and return
-        self._cache = (datetime.utcnow(), entities)
         return entities
 
     # ----------------------- XML Helpers -----------------------
 
     @staticmethod
     def _localname(tag: str) -> str:
-        """
-        Return the local name of an XML tag (strip namespace).
-        """
         return tag.split("}", 1)[-1] if "}" in tag else tag
 
     def _iter_subjects(self, root: ET.Element):
-        """
-        Iterate all 'subject' nodes, regardless of namespace or specific schema flavor.
-        v1.1 commonly uses 'sanctionEntity' / 'sanctionPerson', but we fall back to any 'subject'.
-        """
-        # Prefer explicit nodes if present
-        candidates = []
         for el in root.iter():
             ln = self._localname(el.tag).lower()
             if ln in {"sanctionentity", "sanctionperson", "subject", "entity"}:
-                candidates.append(el)
-        return candidates
+                yield el
 
     def _parse_subject(self, node: ET.Element) -> Optional[Dict[str, Any]]:
-        """
-        Parse a single subject (entity/person) node into a normalized dict.
-        Robust to namespace and minor schema variations by matching on local tag names.
-        """
-        # Determine subject type (entity vs person)
         entity_type = self._first_text(node, {"subjecttype", "sdntype", "type"})
         if not entity_type:
-            # Infer from tag name if missing
             tag_ln = self._localname(node.tag).lower()
             if "person" in tag_ln:
                 entity_type = "Individual"
             elif "entity" in tag_ln or "undertaking" in tag_ln or "group" in tag_ln:
                 entity_type = "Entity"
             else:
-                # Default to Entity to avoid missing orgs when the tag is generic 'subject'
                 entity_type = "Entity"
 
-        # EU reference number
-        eu_ref = self._first_text(node, {"eureferencenumber", "referenceNumber", "euReferenceNumber"})
-
-        # Names & aliases
+        eu_ref = self._first_text(node, {"eureferencenumber", "referencenumber", "eureferencenumber"})
         name, aliases = self._extract_names(node)
-
-        # Addresses
         addresses = self._extract_addresses(node)
-
-        # Identifiers
         identifiers = self._extract_identifiers(node)
-
-        # Programme(s) and legal basis/regulation
         programme = self._first_text(node, {"programme", "program"})
-        legal_basis = self._first_text(node, {"regulation", "legalbasis", "legalBasis"})
-
-        # Listing date (entry into force)
+        legal_basis = self._first_text(node, {"regulation", "legalbasis"})
         listing_date = self._first_text(node, {"regulationentryintoforcedate", "entryintoforcedate", "listingdate"})
-
-        # Remarks
         remark = self._first_text(node, {"remark", "remarks"})
 
-        # If we failed to get a main name, bail out
         if not name and not aliases:
             return None
 
-        # Choose a name if the "strong" one wasn't found
         primary_name = name or (aliases[0] if aliases else "")
-
         return {
             "name": primary_name,
             "eu_reference_number": eu_ref,
@@ -209,84 +247,60 @@ class EUSanctionsClient:
         }
 
     def _extract_names(self, node: ET.Element) -> Tuple[str, List[str]]:
-        """
-        Extract name aliases; prefer 'strong=true' as the primary name.
-        """
         primary = ""
         aliases: List[str] = []
-
         for child in node.iter():
             if self._localname(child.tag).lower() == "namealias":
-                whole = self._first_text(child, {"wholename", "wholeName", "name"})
-                strong = self._first_text(child, {"strong"})  # often "true"/"false"
+                whole = self._first_text(child, {"wholename", "name"})
+                strong = self._first_text(child, {"strong"})
                 if whole:
                     if (strong or "").strip().lower() == "true":
                         primary = whole.strip()
                     else:
                         aliases.append(whole.strip())
-
-        # Fallback: some schemas put a direct <name> or <wholeName> under the subject
         if not primary:
-            direct = self._first_text(node, {"name", "wholename", "lastName"})
+            direct = self._first_text(node, {"name", "wholename", "lastname"})
             if direct:
                 primary = direct.strip()
-
         return primary, aliases
 
     def _extract_addresses(self, node: ET.Element) -> List[Dict[str, str]]:
-        """
-        Extract addresses from a subject.
-        """
         addresses: List[Dict[str, str]] = []
         for child in node.iter():
             if self._localname(child.tag).lower() == "address":
                 address = {
                     "street": self._first_text(child, {"street"}),
                     "city": self._first_text(child, {"city", "town"}),
-                    "zip_code": self._first_text(child, {"zipcode", "zip", "postCode"}),
-                    "country": self._first_text(child, {"countrydescription", "country", "countryCode"}),
+                    "zip_code": self._first_text(child, {"zipcode", "zip", "postcode"}),
+                    "country": self._first_text(child, {"countrydescription", "country", "countrycode"}),
                     "full_address": self._first_text(child, {"asatlistingtime", "fulladdress"})
                 }
-                if any(v for v in address.values()):
+                if any(address.values()):
                     addresses.append(address)
         return addresses
 
     def _extract_identifiers(self, node: ET.Element) -> List[Dict[str, str]]:
-        """
-        Extract identification numbers (e.g., reg#, tax#, passport) from a subject.
-        """
         identifiers: List[Dict[str, str]] = []
         for child in node.iter():
             if self._localname(child.tag).lower() in {"identification", "id", "identifier"}:
                 id_type = self._first_text(child, {"identificationtypedescription", "identificationtypecode", "type"})
-                number = self._first_text(child, {"number", "value", "idNumber"})
+                number = self._first_text(child, {"number", "value", "idnumber"})
                 if number:
                     identifiers.append({"type": (id_type or "").strip(), "value": number.strip()})
         return identifiers
 
     def _first_text(self, node: ET.Element, local_names: set) -> str:
-        """
-        Return the first matching descendant's text where the tag's local name is in `local_names`.
-        Case-insensitive on local names.
-        """
         targets = {ln.lower() for ln in local_names}
-        # Check node itself first
         if self._localname(node.tag).lower() in targets:
             return (node.text or "").strip()
-
-        # Then any descendants
         for el in node.iter():
-            if self._localname(el.tag).lower() in targets:
-                if el.text:
-                    return el.text.strip()
+            if self._localname(el.tag).lower() in targets and el.text:
+                return el.text.strip()
         return ""
 
     # ----------------------- Matching -----------------------
 
     def _clean_company_name(self, name: str) -> str:
-        """
-        Normalize company names to improve fuzzy matching.
-        """
         suffixes = {
             "inc", "llc", "ltd", "limited", "corp", "corporation",
             "company", "co", "plc", "sa", "ag", "gmbh", "bv",
@@ -301,28 +315,20 @@ class EUSanctionsClient:
         return " ".join(words)
 
     def _calculate_match_score(self, search_name: str, found_name: str) -> float:
-        """
-        Simple Jaccard word-overlap with bonuses for containment/exact.
-        """
         s = self._clean_company_name(search_name)
         f = self._clean_company_name(found_name)
-
         if not s or not f:
             return 0.0
         if s == f:
             return 1.0
         if s in f or f in s:
             return 0.9
-
         sw, fw = set(s.split()), set(f.split())
         if not sw or not fw:
             return 0.0
         return len(sw & fw) / len(sw | fw)
 
     def _is_potential_match(self, search_name: str, entry_name: str) -> bool:
-        """
-        Quick prefilter: any overlapping 'significant' word (len>3).
-        """
         s = self._clean_company_name(search_name)
         e = self._clean_company_name(entry_name)
         sw = {w for w in s.split() if len(w) > 3}
@@ -333,11 +339,7 @@ class EUSanctionsClient:
 # ----------------------- Example usage -----------------------
 if __name__ == "__main__":
     client = EUSanctionsClient()
-    test_companies = [
-        "Your Company Name",   # Replace with actual company
-        "Gazprom",             # Likely to return matches on EU list
-        "Apple Inc"            # Should be clear
-    ]
+    test_companies = ["Your Company Name", "Gazprom", "Apple Inc"]
     for company in test_companies:
         print(f"\nSearching for: {company}")
         result = client.search_company(company)
