@@ -128,7 +128,9 @@ elif st.session_state.step == 2:
                     # Use real OFAC API
                     try:
                         ofac_client = OFACClient()
+                        st.write("Debug: OFAC client created successfully")
                         result = ofac_client.search_company(st.session_state.company_name)
+                        st.write("Debug: API result:", result)
                         
                         # Save the response
                         db.save_api_response(
