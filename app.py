@@ -303,14 +303,14 @@ elif st.session_state.step == 2:
     if st.button("Continue to Legal/Litigation Check →", type="primary"):
         st.session_state.step = 3
         st.rerun()
-                else:
-                    st.session_state.os_summary = "OpenSanctions check not available—no results."
-                    st.session_state.os_result = {"status": "clear", "matches": []}
-                    time.sleep(1)
-                    db.save_api_response(
-                        st.session_state.assessment_id, "OpenSanctions", st.session_state.os_result, 0.0
-                    )
-                    st.rerun()
+    else:
+        st.session_state.os_summary = "OpenSanctions check not available—no results."
+        st.session_state.os_result = {"status": "clear", "matches": []}
+        time.sleep(1)
+        db.save_api_response(
+        st.session_state.assessment_id, "OpenSanctions", st.session_state.os_result, 0.0
+        )
+        st.rerun()
     
     # Combined summary button
     st.markdown("---")
