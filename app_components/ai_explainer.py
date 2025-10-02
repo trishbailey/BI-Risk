@@ -1,49 +1,54 @@
 import os
-from src.llm.openai_client import OpenAIClient  # Reuse your existing LLM client
+from src.llm.openai_client import OpenAIClient
 
 def explain_sanctions(company_name: str, ofac_res: dict, eu_res: dict, os_res: dict) -> dict:
     """
-    Generates a quick AI summary of sanctions findings using OpenAI.
-    Returns: Dict with 'overall_assessment', 'risk_level', and details.
+    Generates a quick factual summary of sanctions data using OpenAI.
+    Facts only, plain language—no risk assessments.
     """
     api_key = os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return {
-            "overall_assessment": "AI summary unavailable—review results manually.",
-            "risk_level": "UNKNOWN",
+            "overall_assessment": "Summary unavailable—review results manually.",
             "details": {"ofac": ofac_res, "eu": eu_res, "os": os_res}
         }
 
     try:
         llm = OpenAIClient(api_key)
         
-        # Build simple context (mock "findings" and "api_responses" for this mini-summary)
-        findings = []  # For sanctions, derive from results
-        if ofac_res.get("matches"):
-            findings.append({"risk_category": "Sanctions", "severity": "high", "description": f"{len(ofac_res['matches'])} OFAC matches", "source_api": "OFAC"})
-        if eu_res.get("matches"):
-            findings.append({"risk_category": "Sanctions", "severity": "high", "description": f"{len(eu_res['matches'])} EU matches", "source_api": "EU"})
-        if os_res.get("matches"):
-            findings.append({"risk_category": "Sanctions", "severity": "high", "description": f"{len(os_res['matches'])} OpenSanctions matches", "source_api": "OpenSanctions"})
+        # Build factual context (ignore empty eu_res)
+        ofac_facts = f"OFAC: {ofac_res.get('summary', 'No results')}"
+        os_facts = f"OpenSanctions: {os_res.get('summary', 'No results')}"
+        eu_facts = f"EU: {eu_res.get('summary', 'Not checked')}" if eu_res else "EU: Not checked"
         
-        api_responses = [
-            {"api_name": "OFAC", "response_data": ofac_res},
-            {"api_name": "EU", "response_data": eu_res},
-            {"api_name": "OpenSanctions", "response_data": os_res}
-        ]
+        findings_text = f"{ofac_facts}. {eu_facts}. {os_facts}."
         
-        # Reuse the full report method but with a sanctions-focused prompt override
-        report = llm.generate_full_report(findings, api_responses, company_name, "General")
+        # Reuse client but with sanctions-specific prompt
+        prompt = f"""
+        Summarize sanctions check facts for "{company_name}" in plain English. Just the details—no risk opinions.
+        
+        Data:
+        {findings_text}
+        
+        Output: 2-3 short sentences or bullets with key facts (e.g., number of matches, sources). Under 150 words.
+        """
+        
+        response = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=200,
+            temperature=0.1
+        )
+        
+        content = response.choices[0].message.content.strip()
         
         return {
-            "overall_assessment": report["full_report"][:300] + "..." if len(report["full_report"]) > 300 else report["full_report"],  # Truncate for quick view
-            "risk_level": report["overall_risk_score"],
+            "overall_assessment": content,
             "details": {"ofac": ofac_res, "eu": eu_res, "os": os_res}
         }
         
     except Exception as e:
         return {
             "overall_assessment": f"Error: {str(e)}",
-            "risk_level": "ERROR",
             "details": {"ofac": ofac_res, "eu": eu_res, "os": os_res}
         }
