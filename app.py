@@ -102,6 +102,15 @@ elif st.session_state.step == 2:
     
     st.info("This step checks OFAC, OpenSanctions, and EU sanctions databases.")
     
+    # Debug: Check if files exist
+    import os
+    st.write("Debug - Current directory:", os.getcwd())
+    st.write("Debug - Files in src:", os.listdir("src") if os.path.exists("src") else "src directory not found")
+    if os.path.exists("src/api_clients"):
+        st.write("Debug - Files in src/api_clients:", os.listdir("src/api_clients"))
+    if os.path.exists("src/api_clients/sanctions"):
+        st.write("Debug - Files in src/api_clients/sanctions:", os.listdir("src/api_clients/sanctions"))
+    
     # Import OFAC client
     try:
         from src.api_clients.sanctions.ofac import OFACClient
