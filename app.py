@@ -116,16 +116,18 @@ elif st.session_state.step == 2:
         opensanctions_available = True
     except Exception:
         opensanctions_available = False
-    # REMOVED: EU Sanctions column and logic (redundant with OpenSanctions)
-        col1, col2 = st.columns(2)  # Now 2 columns instead of 3
     
-    # Persistent OFAC summary (AI-generated plain text)
-    if st.session_state.get('ofac_summary'):
-        st.subheader("OFAC Summary")
-        st.write(st.session_state.ofac_summary)
+    # Define columns at the top of the block to ensure scope
+    col1, col2 = st.columns(2)
     
-    # --- OFAC Button ---
+    # OFAC Section (persistent summary + button)
     with col1:
+        # Persistent OFAC summary (AI-generated plain text)
+        if st.session_state.get('ofac_summary'):
+            st.subheader("OFAC Summary")
+            st.write(st.session_state.ofac_summary)
+        
+        # --- OFAC Button ---
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
             with st.spinner("Checking OFAC and generating summary…"):
                 if ofac_available:
@@ -173,13 +175,14 @@ elif st.session_state.step == 2:
                     )
                     st.rerun()
     
-    # Persistent OpenSanctions summary (AI-generated plain text)
-    if st.session_state.get('os_summary'):
-        st.subheader("OpenSanctions Summary")
-        st.write(st.session_state.os_summary)
-    
-    # --- OpenSanctions Button ---
+    # OpenSanctions Section (persistent summary + button)
     with col2:
+        # Persistent OpenSanctions summary (AI-generated plain text)
+        if st.session_state.get('os_summary'):
+            st.subheader("OpenSanctions Summary")
+            st.write(st.session_state.os_summary)
+        
+        # --- OpenSanctions Button ---
         if st.button("🔍 Check OpenSanctions", key="opensanctions_check"):
             with st.spinner("Checking OpenSanctions and generating summary…"):
                 if opensanctions_available:
