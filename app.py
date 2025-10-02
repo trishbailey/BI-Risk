@@ -246,7 +246,7 @@ elif st.session_state.step == 2:
                 ofac_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OFAC_SDN"), {})
                 os_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OpenSanctions"), {})
                 try:
-                    ai = explain_sanctions(st.session_state.company_name, ofac_res, {}, os_res)  # Pass empty {} for EU
+                    ai = explain_sanctions(st.session_state.company_name, ofac_res, os_res)
                     st.subheader("Factual Sanctions Summary")
                     st.write(ai["overall_assessment"])  # Plain text
                     with st.expander("Details (JSON)"):
