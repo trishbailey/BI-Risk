@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
 import streamlit as st
+import html
 
 def _chip(text: str) -> str:
     t = (text or "").strip()
@@ -10,7 +11,7 @@ def _chip(text: str) -> str:
         display:inline-block; padding:4px 8px; margin:2px 6px 2px 0;
         border-radius:999px; font-size:12px; line-height:12px;
         border:1px solid rgba(0,0,0,0.15)
-    ">{st.html_escape(t)}</span>"""
+    ">{html_escape(t)}</span>"""
 
 def _clean_list(values: List[str]) -> List[str]:
     seen, out = set(), []
@@ -66,7 +67,7 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
     name = result.get("searched_name", "")
     ts = result.get("search_timestamp", "")
     if name or ts:
-        st.caption(f"Searched: **{st.html_escape(name)}** • {st.html_escape(ts)}")
+        st.caption(f"Searched: **{html_escape(name)}** • {html_escape(ts)}")
 
     if status == "error":
         st.error(f"Error: {result.get('error','Unknown error')}")
@@ -82,7 +83,7 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
     for m in matches:
         with st.container(border=True):
             title = m.get("name") or "(no name)"
-            st.markdown(f"### {st.html_escape(title)}")
+            st.markdown(f"### {html_escape(title)}")
 
             score = float(m.get("match_score") or 0.0)
             programs = _clean_list(m.get("programs") or [])
@@ -103,12 +104,12 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
 
             warnings, clean_ids = _extract_warnings_from_ids(m.get("ids") or [])
             if warnings:
-                st.info("**Secondary sanctions risk**\n\n- " + "\n- ".join(st.html_escape(w) for w in warnings))
+                st.info("**Secondary sanctions risk**\n\n- " + "\n- ".join(html_escape(w) for w in warnings))
 
             aliases = _clean_list(m.get("aliases") or [])
             if aliases:
                 with st.expander(f"Aliases ({len(aliases)})"):
-                    st.write("\n".join(f"- {st.html_escape(a)}" for a in aliases))
+                    st.write("\n".join(f"- {html_escape(a)}" for a in aliases))
 
             addrs = _clean_addresses(m.get("addresses") or [])
             if addrs:
@@ -118,19 +119,19 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
                             a.get("address1"), a.get("address2"), a.get("city"),
                             a.get("state"), a.get("postal_code"), a.get("country")
                         ] if x])
-                        st.write(f"- {st.html_escape(line)}")
+                        st.write(f"- {html_escape(line)}")
 
             if clean_ids:
                 with st.expander(f"Identifiers ({len(clean_ids)})"):
                     for i in clean_ids:
                         t = (i.get("type") or "").strip() or "ID"
                         v = i.get("value","")
-                        st.write(f"- **{st.html_escape(t)}:** {st.html_escape(v)}")
+                        st.write(f"- **{html_escape(t)}:** {html_escape(v)}")
 
             remarks = (m.get("remarks") or m.get("remark") or "").strip()
             pub = _fmt_date(m.get("publishDate","") or m.get("listing_date",""))
             foot = []
             if pub: foot.append(f"Published/Listed: {pub}")
-            if remarks: foot.append(f"Remarks: {st.html_escape(remarks)}")
+            if remarks: foot.append(f"Remarks: {html_escape(remarks)}")
             if foot:
                 st.caption(" • ".join(foot))
