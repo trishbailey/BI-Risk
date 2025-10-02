@@ -180,16 +180,79 @@ elif st.session_state.step == 2:
     with col2:
         if st.button("🔍 Check OpenSanctions", key="opensanctions_check"):
             with st.spinner("Checking OpenSanctions..."):
-                time.sleep(2)
+                # Import OpenSanctions client
+                try:
+                    from src.api_clients.sanctions.opensanctions import OpenSanctionsClient
+                    opensanctions_available = True
+                except ImportError:
+                    opensanctions_available = False
                 
-                db.save_api_response(
-                    st.session_state.assessment_id,
-                    "OpenSanctions",
-                    {"status": "clear", "matches": []},
-                    0.0
-                )
-                
-                st.success("✅ OpenSanctions Check Complete - No matches found")
+                if opensanctions_available:
+                    try:
+                        os_client = OpenSanctionsClient()
+                        result = os_client.search_company(st.session_state.company_name)
+                        
+                        # Save the response
+                        db.save_api_response(
+                            st.session_state.assessment_id,
+                            "OpenSanctions",
+                            result,
+                            result.get('api_cost', 0.0)
+                        )
+                        
+                        # Display results
+                        if result['status'] == 'clear':
+                            st.success(f"✅ OpenSanctions Check Complete - No matches found")
+                        elif result['status'] == 'found_matches':
+                            st.warning(f"⚠️ OpenSanctions Check - Found {result['match_count']} potential matches")
+                            
+                            # Add risk findings
+                            for match in result['matches']:
+                                severity = 'critical' if match['match_score'] > 0.9 else 'high'
+                                programs_str = ', '.join(match.get('programs', []))
+                                
+                                db.add_risk_finding(
+                                    st.session_state.assessment_id,
+                                    "Sanctions",
+                                    severity,
+                                    f"Potential match in OpenSanctions: {match['name']} (score: {match['match_score']}) - Programs: {programs_str}",
+                                    "OpenSanctions",
+                                    match
+                                )
+                            
+                            # Show details in expander
+                            with st.expander("View OpenSanctions Match Details"):
+                                for match in result['matches']:
+                                    st.write(f"**{match['name']}**")
+                                    st.write(f"- Match Score: {match['match_score']}")
+                                    st.write(f"- Schema: {match.get('schema', 'Unknown')}")
+                                    if match.get('programs'):
+                                        st.write(f"- Programs: {', '.join(match['programs'])}")
+                                    if match.get('countries'):
+                                        st.write(f"- Countries: {', '.join(match['countries'])}")
+                                    if match.get('aliases'):
+                                        st.write(f"- Also known as: {', '.join(match['aliases'][:3])}")
+                        else:
+                            st.error(f"Error checking OpenSanctions: {result.get('error')}")
+                            
+                    except Exception as e:
+                        st.error(f"Error with OpenSanctions API: {str(e)}")
+                        db.save_api_response(
+                            st.session_state.assessment_id,
+                            "OpenSanctions",
+                            {"status": "error", "error": str(e)},
+                            0.0
+                        )
+                else:
+                    # Use mock data if client not available
+                    time.sleep(2)
+                    db.save_api_response(
+                        st.session_state.assessment_id,
+                        "OpenSanctions",
+                        {"status": "clear", "matches": []},
+                        0.0
+                    )
+                    st.success("✅ OpenSanctions Check Complete - No matches found")
     
     with col3:
         if st.button("🔍 Check EU Sanctions", key="eu_check"):
