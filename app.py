@@ -83,8 +83,8 @@ if st.session_state.step == 1:
         submitted = st.form_submit_button("Start Assessment")
         if submitted and company_name:
             try:
-                # NEW: Check for existing assessment for this company
-                existing_assessment = db.get_assessment_by_company(company_name)  # Assume this method queries 'assessments' by company_name, returns latest incomplete or completed
+                # Check for existing assessment for this company
+                existing_assessment = db.get_assessment_by_company(company_name)  # Query by company_name, return latest
                 if existing_assessment:
                     assessment_id = existing_assessment['id']
                     st.session_state.assessment_id = assessment_id
@@ -92,11 +92,12 @@ if st.session_state.step == 1:
                     st.session_state.step = existing_assessment.get('last_step', 2)  # Resume from last step
                     st.session_state.total_cost = existing_assessment.get('total_cost', 0.0)
                     # Load cached data
-                    st.session_state.ofac_result = next((r["response_data"] for r in db.get_api_responses(assessment_id) if r["api_name"] == "OFAC_SDN"), {})
-                    st.session_state.os_result = next((r["response_data"] for r in db.get_api_responses(assessment_id) if r["api_name"] == "OpenSanctions"), {})
-                    st.session_state.ofac_summary = next((r["response_data"].get("summary", "") for r in db.get_api_responses(assessment_id) if r["api_name"] == "OFAC_Summary"), "")
-                    st.session_state.os_summary = next((r["response_data"].get("summary", "") for r in db.get_api_responses(assessment_id) if r["api_name"] == "OpenSanctions_Summary"), {})
-                    st.session_state.combined_summary = next((r["response_data"].get("combined", "") for r in db.get_api_responses(assessment_id) if r["api_name"] == "Combined_Summary"), "")
+                    api_responses = db.get_api_responses(assessment_id)
+                    st.session_state.ofac_result = next((r["response_data"] for r in api_responses if r["api_name"] == "OFAC_SDN"), {})
+                    st.session_state.os_result = next((r["response_data"] for r in api_responses if r["api_name"] == "OpenSanctions"), {})
+                    st.session_state.ofac_summary = next((r["response_data"].get("summary", "") for r in api_responses if r["api_name"] == "OFAC_Summary"), "")
+                    st.session_state.os_summary = next((r["response_data"].get("summary", "") for r in api_responses if r["api_name"] == "OpenSanctions_Summary"), "")
+                    st.session_state.combined_summary = next((r["response_data"].get("combined", "") for r in api_responses if r["api_name"] == "Combined_Summary"), {})
                     st.success(f"Resuming previous assessment for {company_name} (from Step {st.session_state.step}).")
                 else:
                     # Create new
@@ -116,4 +117,60 @@ if st.session_state.step == 1:
 # Step 2: Sanctions Check
 # -----------------------------------------------------------------------------
 elif st.session_state.step == 2:
-    st.header("Step
+    st.header("Step 2: Sanctions Check")
+    st.subheader(f"Checking: {st.session_state.company_name}")
+    st.info("This step checks OFAC and OpenSanctions (covers global incl. EU/UN/UK).")
+    # Lazy imports so the app loads even if a client is missing
+    try:
+        from src.api_clients.sanctions.ofac import OFACClient
+        ofac_available = True
+    except Exception as e:
+        st.error(f"OFAC client import error: {e}")
+        ofac_available = False
+    try:
+        from src.api_clients.sanctions.opensanctions import OpenSanctionsClient
+        opensanctions_available = True
+    except Exception:
+        opensanctions_available = False
+   
+    # Define columns at the top of the block to ensure scope
+    col1, col2 = st.columns(2)
+   
+    # OFAC Section (persistent summary + pagination button)
+    with col1:
+        # Initialize pagination if not set
+        if 'ofac_page' not in st.session_state:
+            st.session_state.ofac_page = 1
+            st.session_state.ofac_full_matches = []  # Store all matches
+       
+        # Persistent OFAC summary (initial + batches)
+        if st.session_state.get('ofac_summary'):
+            st.subheader("OFAC Summary")
+            st.write(st.session_state.ofac_summary)
+       
+        # Pagination button (dynamic label)
+        ofac_res = st.session_state.get('ofac_result', {})
+        match_count = ofac_res.get('match_count', 0)
+        current_page = st.session_state.ofac_page
+        batch_size = 10
+        remaining = max(0, match_count - (current_page * batch_size))
+        if remaining > 0:
+            if st.button(f"Display More OFAC ({remaining} left)", key="more_ofac"):
+                with st.spinner("Generating next batch…"):
+                    batch_summary = explain_batch(st.session_state.company_name, ofac_res, (current_page - 1) * batch_size, batch_size, "OFAC")
+                    st.session_state.ofac_summary += f"\n\nNext batch:\n{batch_summary}"
+                    st.session_state.ofac_page += 1
+                    st.session_state.total_cost += 0.002
+                    st.rerun()
+        elif current_page > 1:
+            st.info("All OFAC results summarized.")
+       
+        # --- Initial OFAC Button ---
+        if st.button("🔍 Check OFAC SDN", key="ofac_check"):
+            with st.spinner("Checking OFAC and generating initial summary…"):
+                if ofac_available:
+                    try:
+                        client = OFACClient()
+                        ofac_res = client.search_company(st.session_state.company_name)
+                        # Store result
+                        st.session_state.ofac_result
