@@ -115,23 +115,23 @@ elif st.session_state.step == 2:
         opensanctions_available = True
     except Exception:
         opensanctions_available = False
-    
+   
     # Define columns at the top of the block to ensure scope
     col1, col2 = st.columns(2)
-    
-    # OFAC Section (persistent summary + button)
+   
+    # OFAC Section (persistent summary + pagination button)
         # OFAC Section (persistent summary + pagination button)
     with col1:
         # Initialize pagination if not set
         if 'ofac_page' not in st.session_state:
             st.session_state.ofac_page = 1
-            st.session_state.ofac_full_matches = []  # Store all matches
-        
+            st.session_state.ofac_full_matches = [] # Store all matches
+       
         # Persistent OFAC summary (initial + batches)
         if st.session_state.get('ofac_summary'):
             st.subheader("OFAC Summary")
             st.write(st.session_state.ofac_summary)
-        
+       
         # Pagination button (dynamic label)
         ofac_res = st.session_state.get('ofac_result', {})
         match_count = ofac_res.get('match_count', 0)
@@ -148,7 +148,7 @@ elif st.session_state.step == 2:
                     st.rerun()
         elif current_page > 1:
             st.info("All OFAC results summarized.")
-        
+       
         # --- Initial OFAC Button ---
         if st.button("🔍 Check OFAC SDN", key="ofac_check"):
             with st.spinner("Checking OFAC and generating initial summary…"):
@@ -163,7 +163,7 @@ elif st.session_state.step == 2:
                             st.session_state.assessment_id,
                             "OFAC_SDN",
                             ofac_res,
-                            ofac_res.get("api_cost", 0.0),
+                            ofac_res.get("api_cost
                         )
                         st.session_state.total_cost += ofac_res.get("api_cost", 0.0)
                         # risk findings (keep for DB)
