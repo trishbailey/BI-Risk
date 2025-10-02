@@ -220,11 +220,10 @@ elif st.session_state.step == 2:
                 os_res = next((r["response_data"] for r in api_responses if r["api_name"] == "OpenSanctions"), {})
                 try:
                     ai = explain_sanctions(st.session_state.company_name, ofac_res, {}, os_res)  # Pass empty {} for EU
-                    st.subheader("AI Summary")
-                    st.write(ai["overall_assessment"])
-                    st.write(f"**Risk:** {ai['risk_level']}")
+                    st.subheader("Factual Sanctions Summary")
+                    st.write(ai["overall_assessment"])  # Plain text
                     with st.expander("Details (JSON)"):
-                        st.json(ai)
+                        st.json(ai["details"])  # Keep JSON hidden in expander
                 except Exception as e:
                     st.error(f"AI summary failed: {e}")
     else:
@@ -364,17 +363,10 @@ elif st.session_state.step == 5:
                         )
                         # Display structured sections
                         st.subheader("AI-Generated Report")
-                        st.markdown("### Executive Summary")
-                        st.markdown(report["full_report"].split("**Key Risks**")[0].strip() if "**Key Risks**" in report["full_report"] else report["full_report"])
-                        st.markdown("### Key Risks")
-                        st.write(report["key_risks"])
-                        st.markdown(f"### Overall Risk Score")
-                        st.metric("Risk Level", report["overall_risk_score"])
-                        st.markdown("### Recommendations")
-                        st.write(report["recommendations"])
-                        with st.expander("Full Report (Markdown)"):
-                            st.markdown(report["full_report"])
-                        st.caption(f"Report generation cost: ${report['cost']:.4f}")
+                        st.write(report["full_report"])  # Plain text output
+                        with st.expander("Raw Findings & APIs"):
+                            st.json({"Findings": findings, "APIs": [r["response_data"] for r in api_responses]})
+                        st.caption(f"Summary cost: ${report['cost']:.4f}")
                     except Exception as e:
                         st.error(f"Report generation failed: {e}")
             else:
