@@ -17,51 +17,27 @@ def explain_sanctions(company_name: str, ofac_res: dict, eu_res: dict, os_res: d
     try:
         llm = OpenAIClient(api_key)
         
-        # Build simple context
-        ofac_status = ofac_res.get("status", "clear")
-        eu_status = eu_res.get("status", "clear")
-        os_status = os_res.get("status", "clear")
-        matches_summary = []
+        # Build simple context (mock "findings" and "api_responses" for this mini-summary)
+        findings = []  # For sanctions, derive from results
         if ofac_res.get("matches"):
-            matches_summary.append(f"OFAC: {len(ofac_res['matches'])} potential matches")
+            findings.append({"risk_category": "Sanctions", "severity": "high", "description": f"{len(ofac_res['matches'])} OFAC matches", "source_api": "OFAC"})
         if eu_res.get("matches"):
-            matches_summary.append(f"EU: {len(eu_res['matches'])} potential matches")
+            findings.append({"risk_category": "Sanctions", "severity": "high", "description": f"{len(eu_res['matches'])} EU matches", "source_api": "EU"})
         if os_res.get("matches"):
-            matches_summary.append(f"OpenSanctions: {len(os_res['matches'])} potential matches")
+            findings.append({"risk_category": "Sanctions", "severity": "high", "description": f"{len(os_res['matches'])} OpenSanctions matches", "source_api": "OpenSanctions"})
         
-        findings_text = "; ".join(matches_summary) if matches_summary else "No matches across all lists."
+        api_responses = [
+            {"api_name": "OFAC", "response_data": ofac_res},
+            {"api_name": "EU", "response_data": eu_res},
+            {"api_name": "OpenSanctions", "response_data": os_res}
+        ]
         
-        prompt = f"""
-        Summarize sanctions risk for "{company_name}":
-        - OFAC: {ofac_status}
-        - EU: {eu_status}
-        - OpenSanctions: {os_status}
-        - Matches: {findings_text}
-        
-        Provide:
-        - overall_assessment: 1-2 sentences on risk.
-        - risk_level: LOW/MEDIUM/HIGH/CRITICAL.
-        Keep under 200 words.
-        """
-        
-        # Use a lightweight call (adapt from your client's summarize_risks if preferred)
-        response = llm.client.chat.completions.create(
-            model=llm.model,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=300,
-            temperature=0.3
-        )
-        
-        content = response.choices[0].message.content.strip()
-        risk_level = "LOW"  # Default; parse or infer
-        if any("high" in content.lower() or "critical" in content.lower() for status in [ofac_status, eu_status, os_status] if "match" in status):
-            risk_level = "HIGH"
-        elif matches_summary:
-            risk_level = "MEDIUM"
+        # Reuse the full report method but with a sanctions-focused prompt override
+        report = llm.generate_full_report(findings, api_responses, company_name, "General")
         
         return {
-            "overall_assessment": content,
-            "risk_level": risk_level,
+            "overall_assessment": report["full_report"][:300] + "..." if len(report["full_report"]) > 300 else report["full_report"],  # Truncate for quick view
+            "risk_level": report["overall_risk_score"],
             "details": {"ofac": ofac_res, "eu": eu_res, "os": os_res}
         }
         
