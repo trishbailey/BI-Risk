@@ -1,5 +1,5 @@
 import os
-from src.llm.openai_client import OpenAIClient
+from src.llm.openai_client import OpenAIClient  # Reuse your existing LLM client
 
 def explain_sanctions(company_name: str, ofac_res: dict, eu_res: dict, os_res: dict) -> dict:
     """
@@ -19,7 +19,6 @@ def explain_sanctions(company_name: str, ofac_res: dict, eu_res: dict, os_res: d
         # Build factual context (ignore empty eu_res)
         ofac_facts = f"OFAC: {ofac_res.get('summary', 'No results')}"
         os_facts = f"OpenSanctions: {os_res.get('summary', 'No results')}"
-        eu_facts = f"EU: {eu_res.get('summary', 'Not checked')}" if eu_res else "EU: Not checked"
         
         findings_text = f"{ofac_facts}. {eu_facts}. {os_facts}."
         
