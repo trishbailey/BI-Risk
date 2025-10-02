@@ -96,7 +96,7 @@ if st.session_state.step == 1:
                     st.session_state.ofac_result = next((r["response_data"] for r in api_responses if r["api_name"] == "OFAC_SDN"), {})
                     st.session_state.os_result = next((r["response_data"] for r in api_responses if r["api_name"] == "OpenSanctions"), {})
                     st.session_state.ofac_summary = next((r["response_data"].get("summary", "") for r in api_responses if r["api_name"] == "OFAC_Summary"), "")
-                    st.session_state.os_summary = next((r["response_data"].get("summary", "") for r in api_responses if r["api_name"] == "OpenSanctions_Summary"), "")
+                    st.session_state.os_summary = next((r["response_data"].get("summary", "") for r in api_responses if r["api_name"] == "OpenSanctions_Summary"), {})
                     st.session_state.combined_summary = next((r["response_data"].get("combined", "") for r in api_responses if r["api_name"] == "Combined_Summary"), {})
                     st.success(f"Resuming previous assessment for {company_name} (from Step {st.session_state.step}).")
                 else:
