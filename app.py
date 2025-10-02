@@ -7,8 +7,8 @@ from src.database import SupabaseManager
 AI_SUMMARY_ENABLED = bool(os.environ.get("OPENAI_API_KEY"))
 # AI explainer functions (no renderers needed now)
 if AI_SUMMARY_ENABLED:
-    from app_components.ai_explainer import explain_ofac, explain_os, explain_sanctions
-    from src.llm.openai_client import OpenAIClient  # For full report generation
+    from app_components.ai_explainer import explain_ofac, explain_os, explain_sanctions, explain_batch
+    from src.llm.openai_client import OpenAIClient # For full report generation
 
 # -----------------------------------------------------------------------------
 # Page config
