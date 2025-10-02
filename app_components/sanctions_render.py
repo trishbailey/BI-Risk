@@ -5,13 +5,16 @@ from datetime import datetime
 import streamlit as st
 import html
 
+def esc(x: Any) -> str:
+    """HTML-escape helper."""
+    return html.escape("" if x is None else str(x))
+
 def _chip(text: str) -> str:
-    t = (text or "").strip()
     return f"""<span style="
         display:inline-block; padding:4px 8px; margin:2px 6px 2px 0;
         border-radius:999px; font-size:12px; line-height:12px;
         border:1px solid rgba(0,0,0,0.15)
-    ">{html_escape(t)}</span>"""
+    ">{esc(text)}</span>"""
 
 def _clean_list(values: List[str]) -> List[str]:
     seen, out = set(), []
@@ -54,23 +57,24 @@ def _risk_badge(score: float, programs: List[str]) -> str:
     ">{base} match</span>"""
 
 def _fmt_date(dt: str) -> str:
-    if not dt: return ""
+    if not dt: 
+        return ""
     try:
         return datetime.fromisoformat(dt.replace("Z","")).strftime("%d %b %Y")
     except Exception:
         return dt
 
 def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
-    st.subheader(f"Sanctions Check — {source_label}")
+    st.subheader(f"Sanctions Check — {esc(source_label)}")
 
     status = result.get("status")
     name = result.get("searched_name", "")
     ts = result.get("search_timestamp", "")
     if name or ts:
-        st.caption(f"Searched: **{html_escape(name)}** • {html_escape(ts)}")
+        st.caption(f"Searched: **{esc(name)}** • {esc(ts)}")
 
     if status == "error":
-        st.error(f"Error: {result.get('error','Unknown error')}")
+        st.error(f"Error: {esc(result.get('error','Unknown error'))}")
         return
 
     matches = result.get("matches", [])
@@ -81,9 +85,10 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
     st.warning(f"Found {result.get('match_count', len(matches))} potential match(es).")
 
     for m in matches:
+        # NOTE: st.container(border=True) requires Streamlit >= 1.31; remove border= if on older versions
         with st.container(border=True):
             title = m.get("name") or "(no name)"
-            st.markdown(f"### {html_escape(title)}")
+            st.markdown(f"### {esc(title)}")
 
             score = float(m.get("match_score") or 0.0)
             programs = _clean_list(m.get("programs") or [])
@@ -96,7 +101,8 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
             with header_cols[2]:
                 st.write("Type"); st.code(m.get("type",""), language=None)
             with header_cols[3]:
-                st.write("Ref/ID"); st.code(m.get("sdn_number") or m.get("eu_reference") or "", language=None)
+                ref = m.get("sdn_number") or m.get("eu_reference") or ""
+                st.write("Ref/ID"); st.code(ref, language=None)
 
             if programs:
                 st.write("Programs")
@@ -104,12 +110,12 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
 
             warnings, clean_ids = _extract_warnings_from_ids(m.get("ids") or [])
             if warnings:
-                st.info("**Secondary sanctions risk**\n\n- " + "\n- ".join(html_escape(w) for w in warnings))
+                st.info("**Secondary sanctions risk**\n\n- " + "\n- ".join(esc(w) for w in warnings))
 
             aliases = _clean_list(m.get("aliases") or [])
             if aliases:
                 with st.expander(f"Aliases ({len(aliases)})"):
-                    st.write("\n".join(f"- {html_escape(a)}" for a in aliases))
+                    st.write("\n".join(f"- {esc(a)}" for a in aliases))
 
             addrs = _clean_addresses(m.get("addresses") or [])
             if addrs:
@@ -119,19 +125,19 @@ def render_sanctions_result(source_label: str, result: Dict[str, Any]) -> None:
                             a.get("address1"), a.get("address2"), a.get("city"),
                             a.get("state"), a.get("postal_code"), a.get("country")
                         ] if x])
-                        st.write(f"- {html_escape(line)}")
+                        st.write(f"- {esc(line)}")
 
             if clean_ids:
                 with st.expander(f"Identifiers ({len(clean_ids)})"):
                     for i in clean_ids:
                         t = (i.get("type") or "").strip() or "ID"
                         v = i.get("value","")
-                        st.write(f"- **{html_escape(t)}:** {html_escape(v)}")
+                        st.write(f"- **{esc(t)}:** {esc(v)}")
 
             remarks = (m.get("remarks") or m.get("remark") or "").strip()
             pub = _fmt_date(m.get("publishDate","") or m.get("listing_date",""))
             foot = []
-            if pub: foot.append(f"Published/Listed: {pub}")
-            if remarks: foot.append(f"Remarks: {html_escape(remarks)}")
+            if pub: foot.append(f"Published/Listed: {esc(pub)}")
+            if remarks: foot.append(f"Remarks: {esc(remarks)}")
             if foot:
                 st.caption(" • ".join(foot))
