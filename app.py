@@ -8,11 +8,19 @@ from src.database import SupabaseManager
 # NOTE: In a real environment, you must ensure OPENAI_API_KEY is set in your environment variables or secrets.
 AI_SUMMARY_ENABLED = bool(os.environ.get("OPENAI_API_KEY"))
 
-# AI explainer functions (no renderers needed now)
-if AI_SUMMARY_ENABLED:
-    # Assuming these imports and functions are correctly implemented in your source files
-    from app_components.ai_explainer import explain_ofac, explain_os, explain_sanctions, explain_batch
-    from src.llm.openai_client import OpenAIClient  # For full report generation
+try:
+    if AI_SUMMARY_ENABLED:
+        from app_components.ai_explainer import (
+            explain_ofac, explain_os, explain_sanctions, explain_batch
+        )
+    else:
+        explain_ofac = explain_os = explain_sanctions = explain_batch = None
+except Exception as e:
+    # If the file is missing or import fails, disable AI and keep the app running
+    AI_SUMMARY_ENABLED = False
+    explain_ofac = explain_os = explain_sanctions = explain_batch = None
+    st.warning(f"AI summarization disabled: {e}")
+
 # -----------------------------------------------------------------------------
 # Page config
 # -----------------------------------------------------------------------------
